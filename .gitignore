@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.class
+
+# SQLite Database and local vault files
+*.db
+*.sqlite3
+password_manager.db
+
+# Backup export files
+*.pmv
+
+# PyInstaller / Build artifacts
+build/
+dist/
+*.spec
+
+# IDE and Editor directories
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# Temporary / Scratch directories
+*.tmp
+*.log
+scratch/
+.system_generated/
