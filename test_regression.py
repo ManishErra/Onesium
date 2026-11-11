@@ -714,9 +714,9 @@ class TestDashboardGUI(unittest.TestCase):
         self.assertEqual(self.app.empty_title_label.cget("text"), "Your vault is empty")
         self.assertEqual(self.app.count_badge.cget("text"), "0 Saved")
 
-    # 7. Adding a credential refreshes the list (+ row click wiring without popup)
+    # 7. Adding a credential refreshes the list (+ row click opens in-window details)
     def test_07_adding_credential_refreshes_list(self):
-        from tkinter import ttk
+        import customtkinter as ctk
 
         self._login_as("crud_user", "Crud!Pass7")
         self.app.open_add_dialog()
@@ -725,10 +725,10 @@ class TestDashboardGUI(unittest.TestCase):
         dlg = self.app.active_dialog
         self.assertIsNotNone(dlg)
 
-        # Locate entries and Save button in the Add dialog
+        # Locate entries and Save button in the CustomTkinter Add dialog
         all_dlg_widgets = self._collect_all_widgets(dlg)
-        entries = [w for w in all_dlg_widgets if isinstance(w, ttk.Entry)]
-        buttons = [w for w in all_dlg_widgets if isinstance(w, ttk.Button)]
+        entries = [w for w in all_dlg_widgets if isinstance(w, ctk.CTkEntry)]
+        buttons = [w for w in all_dlg_widgets if isinstance(w, ctk.CTkButton)]
         # Order: site_entry, user_entry, pwd_entry, notes_entry
         entries[0].insert(0, "Cloudflare")
         entries[1].insert(0, "ops@onesium.dev")
@@ -745,7 +745,7 @@ class TestDashboardGUI(unittest.TestCase):
         self.assertEqual(self.app.count_badge.cget("text"), "1 Saved")
         self.assertEqual(self.app.list_viewport_frame.winfo_manager(), "pack")
 
-        # Clicking a row selects it cleanly without opening any popup
+        # Clicking a row selects it cleanly and opens in-window details (no popup dialog)
         eid = self.app.displayed_entries[0]["entry_id"]
         self.app.handle_row_click(eid)
         self._update()
@@ -754,7 +754,7 @@ class TestDashboardGUI(unittest.TestCase):
 
     # 8. Editing a credential refreshes the list
     def test_08_editing_credential_refreshes_list(self):
-        from tkinter import ttk
+        import customtkinter as ctk
 
         self._login_as("crud_user", "Crud!Pass7")
         eid = self.app.displayed_entries[0]["entry_id"]
@@ -765,8 +765,8 @@ class TestDashboardGUI(unittest.TestCase):
         dlg = self.app.active_dialog
         self.assertIsNotNone(dlg)
         all_dlg_widgets = self._collect_all_widgets(dlg)
-        entries = [w for w in all_dlg_widgets if isinstance(w, ttk.Entry)]
-        buttons = [w for w in all_dlg_widgets if isinstance(w, ttk.Button)]
+        entries = [w for w in all_dlg_widgets if isinstance(w, ctk.CTkEntry)]
+        buttons = [w for w in all_dlg_widgets if isinstance(w, ctk.CTkButton)]
 
         entries[0].delete(0, "end")
         entries[0].insert(0, "Cloudflare Enterprise")
@@ -1050,6 +1050,461 @@ class TestDashboardGUI(unittest.TestCase):
             self.root.report_callback_exception = orig_handler
             self.root.withdraw()
             self._update()
+
+
+# ---------------------------------------------------------------------------
+# 4. Milestone 3 Credential Details & Row Action Icons GUI Tests
+# ---------------------------------------------------------------------------
+class TestCredentialDetailsAndActionsGUI(unittest.TestCase):
+    """
+    Milestone 3 tests:
+    - Credential details view rendering, metadata, zero-auto-decrypt, masking
+    - Explicit Reveal / Hide / Copy without messagebox popups
+    - Non-retention of plaintext after closing details, logout, or auto-lock
+    - Individual card Edit / Delete action icon isolation from row navigation
+    - Edit refresh & rename, cancelled vs confirmed deletion, multi-user isolation
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import customtkinter as ctk
+        import gui as gui_module
+        import vault as vault_module
+
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+
+        cls._orig_funcs = {
+            "register": auth.register_user,
+            "login": auth.login_user,
+            "add": vault_module.add_credential,
+            "get": vault_module.get_credentials,
+            "get_pw": vault_module.get_credential_password,
+            "update": vault_module.update_credential,
+            "delete": vault_module.delete_credential,
+            "search": vault_module.search_credentials,
+            "backup": vault_module.backup_user_vault,
+            "restore": vault_module.restore_user_vault,
+        }
+
+        auth.register_user = lambda u, p, **kw: cls._orig_funcs["register"](u, p, db_path=_TMP_DB)
+        auth.login_user = lambda u, p, **kw: cls._orig_funcs["login"](u, p, db_path=_TMP_DB)
+        vault_module.add_credential = lambda *a, **kw: cls._orig_funcs["add"](*a, db_path=_TMP_DB, **kw)
+        vault_module.get_credentials = lambda uid, **kw: cls._orig_funcs["get"](uid, db_path=_TMP_DB)
+        vault_module.get_credential_password = lambda uid, eid, key, **kw: cls._orig_funcs["get_pw"](uid, eid, key, db_path=_TMP_DB)
+        vault_module.update_credential = lambda *a, **kw: cls._orig_funcs["update"](*a, db_path=_TMP_DB, **kw)
+        vault_module.delete_credential = lambda uid, eid, **kw: cls._orig_funcs["delete"](uid, eid, db_path=_TMP_DB)
+        vault_module.search_credentials = lambda uid, q, **kw: cls._orig_funcs["search"](uid, q, db_path=_TMP_DB)
+        vault_module.backup_user_vault = lambda uid, key, fp, **kw: cls._orig_funcs["backup"](uid, key, fp, db_path=_TMP_DB)
+        vault_module.restore_user_vault = lambda uid, key, fp, **kw: cls._orig_funcs["restore"](uid, key, fp, db_path=_TMP_DB)
+
+        cls.root = ctk.CTk()
+        cls.root.withdraw()
+        cls.app = gui_module.PasswordManagerApp(cls.root)
+        cls.root.update()
+
+    @classmethod
+    def tearDownClass(cls):
+        import vault as vault_module
+
+        auth.register_user = cls._orig_funcs["register"]
+        auth.login_user = cls._orig_funcs["login"]
+        vault_module.add_credential = cls._orig_funcs["add"]
+        vault_module.get_credentials = cls._orig_funcs["get"]
+        vault_module.get_credential_password = cls._orig_funcs["get_pw"]
+        vault_module.update_credential = cls._orig_funcs["update"]
+        vault_module.delete_credential = cls._orig_funcs["delete"]
+        vault_module.search_credentials = cls._orig_funcs["search"]
+        vault_module.backup_user_vault = cls._orig_funcs["backup"]
+        vault_module.restore_user_vault = cls._orig_funcs["restore"]
+
+        try:
+            for after_id in cls.root.tk.call("after", "info"):
+                try:
+                    cls.root.after_cancel(after_id)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            cls.root.destroy()
+        except Exception:
+            pass
+
+    def _update(self):
+        self.root.update_idletasks()
+        self.root.update()
+
+    def _collect_all_widgets(self, root_widget):
+        widgets = [root_widget]
+        for child in root_widget.winfo_children():
+            widgets.extend(self._collect_all_widgets(child))
+        return widgets
+
+    def _login_as(self, username, password):
+        if auth.login_user(username, password) is None:
+            auth.register_user(username, password)
+        self.app.show_login_screen()
+        self._update()
+        self.app.login_username_entry.delete(0, "end")
+        self.app.login_username_entry.insert(0, username)
+        self.app.login_password_entry.delete(0, "end")
+        self.app.login_password_entry.insert(0, password)
+        self.app.handle_login()
+        self._update()
+
+    def test_01_clicking_row_opens_details_masked_without_decrypting(self):
+        import crypto_utils
+        import gui as gui_module
+        import vault as vault_module
+        from tkinter import messagebox
+
+        self._login_as("m3_user_1", "M3!Pass#01")
+        secret_pw = "M3_OnlyRevealOnClick!99"
+        eid = vault_module.add_credential(
+            self.app.current_user_id,
+            self.app.current_encryption_key,
+            "GitHub Enterprise",
+            "dev@onesium.io",
+            secret_pw,
+            notes="Hardware MFA enabled.",
+        )
+        vault_module.add_credential(
+            self.app.current_user_id,
+            self.app.current_encryption_key,
+            "Secondary App",
+            "other@onesium.io",
+            "OtherSecret!88",
+        )
+        self.app.refresh_credential_list()
+        self._update()
+
+        decrypt_calls = [0]
+        get_pw_calls = [0]
+        showinfo_calls = [0]
+        orig_decrypt = crypto_utils.decrypt_password
+        orig_get_pw = vault_module.get_credential_password
+        orig_showinfo = messagebox.showinfo
+
+        def spy_decrypt(*a, **kw):
+            decrypt_calls[0] += 1
+            return orig_decrypt(*a, **kw)
+
+        def spy_get_pw(*a, **kw):
+            get_pw_calls[0] += 1
+            return orig_get_pw(*a, **kw)
+
+        def spy_showinfo(*a, **kw):
+            showinfo_calls[0] += 1
+            return "ok"
+
+        crypto_utils.decrypt_password = spy_decrypt
+        vault_module.get_credential_password = spy_get_pw
+        messagebox.showinfo = spy_showinfo
+        try:
+            # Map window briefly so Tk processes real <Button-1> click on card._canvas
+            self.root.deiconify()
+            self._update()
+            card = self.app.row_widgets[eid]["card"]
+            card._canvas.event_generate("<Button-1>", x=10, y=10)
+            self._update()
+
+            # Details view opened in-window (no popup dialog, no messagebox)
+            self.assertIsNotNone(self.app._details_view)
+            self.assertEqual(self.app._details_entry_id, eid)
+            self.assertIsNone(self.app.active_dialog)
+            self.assertEqual(showinfo_calls[0], 0)
+            self.assertEqual(self.app._vault_list_view.winfo_manager(), "")
+
+            # Zero password decryption when opening details
+            self.assertEqual(decrypt_calls[0], 0)
+            self.assertEqual(get_pw_calls[0], 0)
+
+            # Metadata displayed accurately & password masked by default
+            self.assertEqual(self.app.details_site_title.cget("text"), "GitHub Enterprise")
+            self.assertEqual(self.app.details_site_value.cget("text"), "GitHub Enterprise")
+            self.assertEqual(self.app.details_username_value.cget("text"), "dev@onesium.io")
+            self.assertIn("Hardware MFA enabled.", self.app.details_notes_box.get("1.0", "end"))
+            self.assertTrue(len(self.app.details_created_value.cget("text")) > 0)
+            self.assertTrue(len(self.app.details_updated_value.cget("text")) > 0)
+            self.assertEqual(self.app.details_password_label.cget("text"), gui_module.MASKED_PASSWORD)
+            self.assertFalse(self.app._details_password_revealed)
+        finally:
+            self.root.withdraw()
+            self._update()
+            crypto_utils.decrypt_password = orig_decrypt
+            vault_module.get_credential_password = orig_get_pw
+            messagebox.showinfo = orig_showinfo
+
+    def test_02_reveal_hide_copy_and_leave_clear_password(self):
+        import gui as gui_module
+        import vault as vault_module
+        from tkinter import messagebox
+
+        self._login_as("m3_user_2", "M3!Pass#02")
+        pw_one = "Reveal_Only_This_One!1"
+        pw_two = "Never_Touch_Second!2"
+        eid1 = vault_module.add_credential(
+            self.app.current_user_id, self.app.current_encryption_key, "ServiceOne", "u1@local", pw_one
+        )
+        vault_module.add_credential(
+            self.app.current_user_id, self.app.current_encryption_key, "ServiceTwo", "u2@local", pw_two
+        )
+        self.app.refresh_credential_list()
+        self._update()
+        self.app.handle_row_click(eid1)
+        self._update()
+
+        retrieved_ids = []
+        showinfo_calls = [0]
+        orig_get_pw = vault_module.get_credential_password
+        orig_showinfo = messagebox.showinfo
+
+        def spy_get_pw(uid, target_eid, key, **kw):
+            retrieved_ids.append(target_eid)
+            return orig_get_pw(uid, target_eid, key, **kw)
+
+        vault_module.get_credential_password = spy_get_pw
+        messagebox.showinfo = lambda *a, **kw: showinfo_calls.__setitem__(0, showinfo_calls[0] + 1) or "ok"
+        try:
+            # 1. Explicit Reveal decrypts ONLY the selected credential
+            self.app.details_toggle_pw_btn.invoke()
+            self._update()
+            self.assertEqual(retrieved_ids, [eid1])
+            self.assertEqual(self.app.details_password_label.cget("text"), pw_one)
+            self.assertTrue(self.app._details_password_revealed)
+            self.assertEqual(showinfo_calls[0], 0)
+
+            # 2. Hide masks the password again without keeping plaintext on label
+            self.app.details_toggle_pw_btn.invoke()
+            self._update()
+            self.assertEqual(self.app.details_password_label.cget("text"), gui_module.MASKED_PASSWORD)
+            self.assertFalse(self.app._details_password_revealed)
+
+            # 3. Copy retrieves ONLY selected password, writes clipboard, uses no messagebox
+            self.app.details_copy_pw_btn.invoke()
+            self._update()
+            self.assertEqual(retrieved_ids, [eid1, eid1])
+            self.assertEqual(self.root.clipboard_get(), pw_one)
+            self.assertEqual(showinfo_calls[0], 0)
+
+            # 4. Reveal again, then leave via Back to Vault -> plaintext cleared
+            self.app.details_toggle_pw_btn.invoke()
+            self._update()
+            self.assertEqual(self.app.details_password_label.cget("text"), pw_one)
+            self.app.details_back_btn.invoke()
+            self._update()
+
+            self.assertIsNone(self.app._details_view)
+            self.assertIsNone(self.app._details_entry_id)
+            self.assertFalse(self.app._details_password_revealed)
+            self.assertEqual(self.app._vault_list_view.winfo_manager(), "pack")
+            # Ensure pw_one is not retained in app attributes
+            for attr_val in self.app.__dict__.values():
+                self.assertNotIn(pw_one, str(attr_val))
+        finally:
+            vault_module.get_credential_password = orig_get_pw
+            messagebox.showinfo = orig_showinfo
+
+    def test_03_row_action_icons_isolated_from_details_navigation(self):
+        import customtkinter as ctk
+        import vault as vault_module
+
+        self._login_as("m3_user_3", "M3!Pass#03")
+        eid = vault_module.add_credential(
+            self.app.current_user_id,
+            self.app.current_encryption_key,
+            "OriginalSite",
+            "user@orig.io",
+            "OrigPass!33",
+            notes="old note",
+        )
+        self.app.refresh_credential_list()
+        self._update()
+
+        row = self.app.row_widgets[eid]
+        edit_btn = row["edit_btn"]
+        delete_btn = row["delete_btn"]
+
+        # Simulate real mouse click on card's Edit icon button
+        edit_btn._on_enter()
+        edit_btn._on_release()
+        self._update()
+
+        # Must open CustomTkinter Edit dialog, NOT details view
+        self.assertIsNone(self.app._details_view)
+        dlg = self.app.active_dialog
+        self.assertIsNotNone(dlg)
+        self.assertIsInstance(dlg, ctk.CTkToplevel)
+
+        all_dlg_widgets = self._collect_all_widgets(dlg)
+        entries = [w for w in all_dlg_widgets if isinstance(w, ctk.CTkEntry)]
+        buttons = [w for w in all_dlg_widgets if isinstance(w, ctk.CTkButton)]
+
+        # Edit (rename site + update username + replacement password)
+        entries[0].delete(0, "end")
+        entries[0].insert(0, "RenamedSite")
+        entries[1].delete(0, "end")
+        entries[1].insert(0, "renamed@site.io")
+        entries[2].insert(0, "NewPass!44")
+
+        save_btn = next(b for b in buttons if b.cget("text") == "Save")
+        save_btn.invoke()
+        self._update()
+
+        self.assertIsNone(self.app.active_dialog)
+        self.assertIsNone(self.app._details_view)
+        self.assertEqual(self.app.displayed_entries[0]["site_name"], "RenamedSite")
+        self.assertEqual(self.app.row_widgets[eid]["site_name"], "RenamedSite")
+        self.assertEqual(
+            vault_module.get_credential_password(
+                self.app.current_user_id, eid, self.app.current_encryption_key
+            ),
+            "NewPass!44",
+        )
+
+        # Cancelled deletion via row Delete icon changes nothing and does not open details
+        from tkinter import messagebox
+
+        delete_btn = self.app.row_widgets[eid]["delete_btn"]
+        orig_askyesno = messagebox.askyesno
+        messagebox.askyesno = lambda *a, **kw: False
+        try:
+            delete_btn._on_enter()
+            delete_btn._on_release()
+            self._update()
+        finally:
+            messagebox.askyesno = orig_askyesno
+
+        self.assertIsNone(self.app._details_view)
+        self.assertEqual(len(self.app.displayed_entries), 1)
+        self.assertEqual(self.app.displayed_entries[0]["site_name"], "RenamedSite")
+
+        # Confirmed deletion via row Delete icon removes credential & refreshes dashboard
+        messagebox.askyesno = lambda *a, **kw: True
+        try:
+            delete_btn._on_enter()
+            delete_btn._on_release()
+            self._update()
+        finally:
+            messagebox.askyesno = orig_askyesno
+
+        self.assertEqual(len(self.app.displayed_entries), 0)
+        self.assertEqual(self.app.count_badge.cget("text"), "0 Saved")
+        self.assertEqual(self.app.empty_state_frame.winfo_manager(), "pack")
+
+    def test_04_edit_and_delete_from_details_and_user_isolation(self):
+        import customtkinter as ctk
+        import gui as gui_module
+        import vault as vault_module
+        from tkinter import messagebox
+
+        # User B adds a credential first
+        self._login_as("m3_iso_b", "IsoB!Pass#9")
+        b_eid = vault_module.add_credential(
+            self.app.current_user_id, self.app.current_encryption_key, "UserBSecret", "b@b.io", "SecretB!9"
+        )
+        self.app.handle_logout()
+        self._update()
+
+        # User A adds a credential and opens details
+        self._login_as("m3_iso_a", "IsoA!Pass#9")
+        a_eid = vault_module.add_credential(
+            self.app.current_user_id, self.app.current_encryption_key, "UserASite", "a@a.io", "SecretA!9"
+        )
+        self.app.refresh_credential_list()
+        self._update()
+
+        # Attempting to open User B's entry_id as User A must do nothing (isolation)
+        self.app.open_credential_details(b_eid)
+        self._update()
+        self.assertIsNone(self.app._details_view)
+
+        # Open User A's details and edit from Details view
+        self.app.handle_row_click(a_eid)
+        self._update()
+        self.app.details_edit_btn.invoke()
+        self._update()
+
+        dlg = self.app.active_dialog
+        all_dlg_widgets = self._collect_all_widgets(dlg)
+        entries = [w for w in all_dlg_widgets if isinstance(w, ctk.CTkEntry)]
+        buttons = [w for w in all_dlg_widgets if isinstance(w, ctk.CTkButton)]
+
+        entries[0].delete(0, "end")
+        entries[0].insert(0, "UserASiteRenamed")
+        entries[2].insert(0, "UpdatedA!99")
+        next(b for b in buttons if b.cget("text") == "Save").invoke()
+        self._update()
+
+        # Both dashboard and active details view reflect rename, password stays masked
+        self.assertIsNotNone(self.app._details_view)
+        self.assertEqual(self.app.details_site_title.cget("text"), "UserASiteRenamed")
+        self.assertEqual(self.app.details_password_label.cget("text"), gui_module.MASKED_PASSWORD)
+        self.assertEqual(self.app.displayed_entries[0]["site_name"], "UserASiteRenamed")
+
+        # Delete from Details view returns cleanly to vault list
+        orig_askyesno = messagebox.askyesno
+        messagebox.askyesno = lambda *a, **kw: True
+        try:
+            self.app.details_delete_btn.invoke()
+            self._update()
+        finally:
+            messagebox.askyesno = orig_askyesno
+
+        self.assertIsNone(self.app._details_view)
+        self.assertEqual(self.app._vault_list_view.winfo_manager(), "pack")
+        self.assertEqual(len(self.app.displayed_entries), 0)
+
+        # Verify User B's credential was untouched
+        self.app.handle_logout()
+        self._login_as("m3_iso_b", "IsoB!Pass#9")
+        self.assertEqual([e["entry_id"] for e in self.app.displayed_entries], [b_eid])
+
+    def test_05_logout_and_auto_lock_clear_details_and_revealed_password(self):
+        import vault as vault_module
+
+        self._login_as("m3_sess_user", "Sess!Pass#5")
+        pw = "SessionSecret!55"
+        eid = vault_module.add_credential(
+            self.app.current_user_id, self.app.current_encryption_key, "VaultSession", "s@local", pw
+        )
+        self.app.refresh_credential_list()
+        self._update()
+
+        # Open details and reveal password, then logout
+        self.app.handle_row_click(eid)
+        self.app.details_toggle_pw_btn.invoke()
+        self._update()
+        self.assertEqual(self.app.details_password_label.cget("text"), pw)
+
+        self.app.handle_logout()
+        self._update()
+        self.assertIsNone(self.app._details_view)
+        self.assertIsNone(self.app._details_entry_id)
+        self.assertFalse(self.app._details_password_revealed)
+        self.assertIsNone(self.app.current_user_id)
+        self.assertIsNone(self.app.current_encryption_key)
+        for attr_val in self.app.__dict__.values():
+            self.assertNotIn(pw, str(attr_val))
+
+        # Log back in, open details, reveal password, then trigger auto-lock
+        self._login_as("m3_sess_user", "Sess!Pass#5")
+        self.app.handle_row_click(eid)
+        self.app.details_toggle_pw_btn.invoke()
+        self._update()
+        self.assertEqual(self.app.details_password_label.cget("text"), pw)
+
+        self.app.handle_auto_lock()
+        self._update()
+        self.assertIsNone(self.app._details_view)
+        self.assertIsNone(self.app._details_entry_id)
+        self.assertFalse(self.app._details_password_revealed)
+        self.assertIsNone(self.app.current_user_id)
+        self.assertIsNone(self.app.current_encryption_key)
+        self.assertIn("inactivity", self.app.login_status_label.cget("text").lower())
+        for attr_val in self.app.__dict__.values():
+            self.assertNotIn(pw, str(attr_val))
 
 
 # ---------------------------------------------------------------------------

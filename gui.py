@@ -210,6 +210,8 @@ def center_window(window, width, height, parent=None):
 # ---------------------------------------------------------------------------
 # Icon & Formatting Helpers (zero external dependencies)
 # ---------------------------------------------------------------------------
+MASKED_PASSWORD = "\u2022" * 12
+
 _FLUENT_ICONS = {
     "shield": "\uEA18",
     "shield_check": "\uE83D",
@@ -224,6 +226,13 @@ _FLUENT_ICONS = {
     "globe": "\uE774",
     "chevron": "\uE76C",
     "user": "\uE77B",
+    "back": "\uE72B",
+    "edit": "\uE70F",
+    "delete": "\uE74D",
+    "copy": "\uE8C8",
+    "eye": "\uE7B3",
+    "hide": "\uED1A",
+    "check": "\uE73E",
 }
 
 _UNICODE_FALLBACK_ICONS = {
@@ -240,6 +249,13 @@ _UNICODE_FALLBACK_ICONS = {
     "globe": "\U0001f310",
     "chevron": "\u203A",
     "user": "\U0001f464",
+    "back": "\u2190",
+    "edit": "\u270E",
+    "delete": "\U0001f5d1",
+    "copy": "\u2398",
+    "eye": "\U0001f441",
+    "hide": "\u2715",
+    "check": "\u2713",
 }
 
 
@@ -268,6 +284,20 @@ def _format_updated_date(timestamp_str):
         except ValueError:
             continue
     return raw[:16]
+
+
+def _format_detail_timestamp(timestamp_str):
+    """Formats an ISO/SQLite timestamp with time for credential details metadata."""
+    if not timestamp_str:
+        return "Unavailable"
+    raw = str(timestamp_str).strip()
+    for fmt, out_fmt in (("%Y-%m-%d %H:%M:%S", "%b %d, %Y  %H:%M"), ("%Y-%m-%d", "%b %d, %Y")):
+        try:
+            dt = datetime.strptime(raw[:19], fmt)
+            return dt.strftime(out_fmt)
+        except ValueError:
+            continue
+    return raw[:19]
 
 
 def _truncate_text(text, max_len):
@@ -392,6 +422,12 @@ class PasswordManagerApp:
         self._last_search_query = ""
         self._list_canvas = None
         self._list_canvas_window = None
+        self._dashboard_main_area = None
+        self._vault_list_view = None
+        self._details_view = None
+        self._details_entry_id = None
+        self._details_password_revealed = False
+        self._details_feedback_job = None
 
         # Bind user activity to reset auto-lock timer & single global wheel handler
         self.root.bind_all("<Key>", self.reset_auto_lock_timer)
@@ -452,6 +488,17 @@ class PasswordManagerApp:
         self.row_widgets = {}
         self._list_canvas = None
         self._list_canvas_window = None
+        if self._details_feedback_job is not None:
+            try:
+                self.root.after_cancel(self._details_feedback_job)
+            except tk.TclError:
+                pass
+            self._details_feedback_job = None
+        self._mask_details_password()
+        self._dashboard_main_area = None
+        self._vault_list_view = None
+        self._details_view = None
+        self._details_entry_id = None
         for widget in self.container.winfo_children():
             widget.destroy()
 
@@ -1166,7 +1213,7 @@ class PasswordManagerApp:
             inner,
             icon_name="vault",
             label_text="Your Vault",
-            command=self.clear_search,
+            command=self._on_nav_vault_clicked,
             active=True,
             tooltip_text="View all saved credentials",
         )
@@ -1283,8 +1330,12 @@ class PasswordManagerApp:
 
     def _build_dashboard_main(self, parent):
         """Builds the main vault header, search toolbar, credential list, and empty state."""
-        main_area = ctk.CTkFrame(parent, fg_color=COLOR_BG, corner_radius=0)
-        main_area.pack(side="left", fill="both", expand=True, padx=24, pady=20)
+        self._dashboard_main_area = ctk.CTkFrame(parent, fg_color=COLOR_BG, corner_radius=0)
+        self._dashboard_main_area.pack(side="left", fill="both", expand=True, padx=24, pady=20)
+
+        self._vault_list_view = ctk.CTkFrame(self._dashboard_main_area, fg_color=COLOR_BG, corner_radius=0)
+        self._vault_list_view.pack(fill="both", expand=True)
+        main_area = self._vault_list_view
 
         # ---- Top Header Row ----
         header_row = ctk.CTkFrame(main_area, fg_color="transparent", corner_radius=0)
@@ -1604,7 +1655,7 @@ class PasswordManagerApp:
 
         site_lbl = ctk.CTkLabel(
             meta_box,
-            text=_truncate_text(site_name, 46),
+            text=_truncate_text(site_name, 38),
             font=(FONT_FAMILY, 12, "bold"),
             text_color=COLOR_TEXT_PRIMARY,
             anchor="w",
@@ -1613,7 +1664,7 @@ class PasswordManagerApp:
 
         user_lbl = ctk.CTkLabel(
             meta_box,
-            text=_truncate_text(username_field, 52),
+            text=_truncate_text(username_field, 44),
             font=(FONT_FAMILY, 10),
             text_color=COLOR_TEXT_SECONDARY,
             anchor="w",
@@ -1629,23 +1680,60 @@ class PasswordManagerApp:
             text_color=COLOR_TEXT_MUTED,
             anchor="e",
         )
-        date_lbl.grid(row=0, column=2, padx=(12, 10))
+        date_lbl.grid(row=0, column=2, padx=(8, 8))
 
-        # Column 3: Subtle chevron affordance (row click selects; Milestone 3 opens detail view)
+        # Column 3 & 4: Compact icon-only Edit and Delete actions (isolated from row click)
+        edit_btn = ctk.CTkButton(
+            card,
+            text=self._icon_glyph("edit"),
+            font=self._icon_font_tuple(13),
+            width=30,
+            height=30,
+            corner_radius=6,
+            fg_color="transparent",
+            hover_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_MUTED,
+            command=lambda eid=entry_id: self.open_edit_dialog(eid),
+        )
+        edit_btn.grid(row=0, column=3, padx=(0, 4))
+        _ToolTip(edit_btn, "Edit credential")
+        edit_btn.bind("<Enter>", lambda _e: edit_btn.configure(text_color=COLOR_TEXT_PRIMARY), add="+")
+        edit_btn.bind("<Leave>", lambda _e: edit_btn.configure(text_color=COLOR_TEXT_MUTED), add="+")
+
+        delete_btn = ctk.CTkButton(
+            card,
+            text=self._icon_glyph("delete"),
+            font=self._icon_font_tuple(13),
+            width=30,
+            height=30,
+            corner_radius=6,
+            fg_color="transparent",
+            hover_color="#3B1A22",
+            text_color=COLOR_TEXT_MUTED,
+            command=lambda eid=entry_id: self.handle_delete_credential(eid),
+        )
+        delete_btn.grid(row=0, column=4, padx=(0, 4))
+        _ToolTip(delete_btn, "Delete credential")
+        delete_btn.bind("<Enter>", lambda _e: delete_btn.configure(text_color=COLOR_DANGER), add="+")
+        delete_btn.bind("<Leave>", lambda _e: delete_btn.configure(text_color=COLOR_TEXT_MUTED), add="+")
+
+        # Column 5: Subtle chevron affordance to open details
         chevron_lbl = ctk.CTkLabel(
             card,
             text=self._icon_glyph("chevron"),
             font=self._icon_font_tuple(11),
             text_color=COLOR_PRIMARY if is_selected else COLOR_TEXT_MUTED,
-            width=20,
+            width=18,
         )
-        chevron_lbl.grid(row=0, column=3, padx=(0, 14))
-        _ToolTip(chevron_lbl, "Select credential")
+        chevron_lbl.grid(row=0, column=5, padx=(0, 12))
+        _ToolTip(chevron_lbl, "Open details")
 
         # Store metadata-only widget references (never store passwords)
         self.row_widgets[entry_id] = {
             "card": card,
             "icon_tile": icon_tile,
+            "edit_btn": edit_btn,
+            "delete_btn": delete_btn,
             "chevron": chevron_lbl,
             "site_name": site_name,
             "username_field": username_field,
@@ -1673,7 +1761,7 @@ class PasswordManagerApp:
         def on_click(_event=None):
             self.handle_row_click(entry_id)
 
-        # Bind click & hover cleanly across the entire row card
+        # Bind row-click navigation only on non-action-button elements
         bind_targets = [card, icon_tile, meta_box, site_lbl, user_lbl, date_lbl, chevron_lbl]
         for child in icon_tile.winfo_children():
             bind_targets.append(child)
@@ -1748,6 +1836,11 @@ class PasswordManagerApp:
             else:
                 self.count_badge.configure(text=f"{shown_count} Saved")
 
+    def _on_nav_vault_clicked(self):
+        """Returns to the vault list from details (if open) and clears any active search."""
+        self.close_credential_details()
+        self.clear_search()
+
     def handle_search(self, event=None):
         """Filters displayed credentials via vault.search_credentials without decryption."""
         query = self.search_entry.get()
@@ -1771,7 +1864,7 @@ class PasswordManagerApp:
         self.refresh_credential_list()
 
     def handle_row_click(self, entry_id):
-        """Selects a credential row and invokes the Milestone 3 detail hook."""
+        """Selects a credential row and opens its dedicated credential details view."""
         prev_id = self.selected_entry_id
         if prev_id is not None and prev_id in self.row_widgets and prev_id != entry_id:
             prev_row = self.row_widgets[prev_id]
@@ -1789,353 +1882,915 @@ class PasswordManagerApp:
         self.on_credential_row_click(entry_id)
 
     def on_credential_row_click(self, entry_id):
-        """
-        Extension hook wired to credential row clicks.
-        Milestone 3 will open the dedicated credential detail page from here.
-        """
+        """Opens the dedicated in-window credential details view (without decrypting)."""
+        self.open_credential_details(entry_id)
+
+    # ----------------------------------------------------------------------
+    # 3B. Credential Details View  (CustomTkinter, Zero-Auto-Decrypt)
+    # ----------------------------------------------------------------------
+    def _find_user_credential(self, entry_id):
+        """Returns sqlite3.Row metadata for entry_id scoped strictly to current_user_id."""
+        if self.current_user_id is None or entry_id is None:
+            return None
+        for entry in vault.get_credentials(self.current_user_id):
+            if entry["entry_id"] == entry_id:
+                return entry
         return None
+
+    def open_credential_details(self, entry_id):
+        """
+        Displays the dedicated credential details screen inside the main application.
+        Password remains masked by default and is never decrypted when opening details.
+        """
+        if self._dashboard_main_area is None or not self._dashboard_main_area.winfo_exists():
+            return
+
+        target = self._find_user_credential(entry_id)
+        if target is None:
+            return
+
+        # Tear down any prior details view and ensure password display is cleared
+        self._mask_details_password()
+        if self._details_feedback_job is not None:
+            try:
+                self.root.after_cancel(self._details_feedback_job)
+            except tk.TclError:
+                pass
+            self._details_feedback_job = None
+        if self._details_view is not None and self._details_view.winfo_exists():
+            self._details_view.destroy()
+
+        self._details_entry_id = entry_id
+        self._details_password_revealed = False
+
+        if self._vault_list_view is not None and self._vault_list_view.winfo_exists():
+            self._vault_list_view.pack_forget()
+
+        view = ctk.CTkFrame(self._dashboard_main_area, fg_color=COLOR_BG, corner_radius=0)
+        view.pack(fill="both", expand=True)
+        self._details_view = view
+
+        site_name = target["site_name"]
+        username_field = target["username_field"]
+        notes = (target["notes"] or "").strip()
+        created_at = target["created_at"]
+        updated_at = target["updated_at"]
+
+        # ---- Top Bar: Back to Vault + Edit / Delete ----
+        top_bar = ctk.CTkFrame(view, fg_color="transparent", corner_radius=0)
+        top_bar.pack(fill="x", pady=(0, 10))
+
+        back_btn_wrap = ctk.CTkFrame(
+            top_bar,
+            height=34,
+            corner_radius=8,
+            fg_color=COLOR_SURFACE,
+            border_width=1,
+            border_color=COLOR_BORDER,
+            cursor="hand2",
+        )
+        back_btn_wrap.pack(side="left")
+
+        back_inner = ctk.CTkFrame(back_btn_wrap, fg_color="transparent", corner_radius=0)
+        back_inner.pack(padx=12, pady=6)
+
+        back_icon = ctk.CTkLabel(
+            back_inner,
+            text=self._icon_glyph("back"),
+            font=self._icon_font_tuple(12),
+            text_color=COLOR_TEXT_SECONDARY,
+            fg_color=COLOR_SURFACE,
+        )
+        back_icon.pack(side="left", padx=(0, 6))
+
+        back_lbl = ctk.CTkLabel(
+            back_inner,
+            text="Back to Vault",
+            font=(FONT_FAMILY, 11, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+            fg_color=COLOR_SURFACE,
+        )
+        back_lbl.pack(side="left")
+
+        def _back_enter(_e=None):
+            back_btn_wrap.configure(fg_color=COLOR_SURFACE_ELEVATED)
+            back_icon.configure(fg_color=COLOR_SURFACE_ELEVATED, text_color=COLOR_TEXT_PRIMARY)
+            back_lbl.configure(fg_color=COLOR_SURFACE_ELEVATED)
+
+        def _back_leave(_e=None):
+            try:
+                px, py = back_btn_wrap.winfo_pointerxy()
+                bx, by = back_btn_wrap.winfo_rootx(), back_btn_wrap.winfo_rooty()
+                if bx <= px <= bx + back_btn_wrap.winfo_width() and by <= py <= by + back_btn_wrap.winfo_height():
+                    return
+            except tk.TclError:
+                return
+            back_btn_wrap.configure(fg_color=COLOR_SURFACE)
+            back_icon.configure(fg_color=COLOR_SURFACE, text_color=COLOR_TEXT_SECONDARY)
+            back_lbl.configure(fg_color=COLOR_SURFACE)
+
+        for w in (back_btn_wrap, back_inner, back_icon, back_lbl):
+            w.configure(cursor="hand2")
+            w.bind("<Enter>", _back_enter, add="+")
+            w.bind("<Leave>", _back_leave, add="+")
+            w.bind("<Button-1>", lambda _e: self.close_credential_details(), add="+")
+        back_btn_wrap.invoke = self.close_credential_details
+        self.details_back_btn = back_btn_wrap
+        _ToolTip(back_btn_wrap, "Return to vault list")
+
+        # Right-side Edit & Delete buttons
+        actions_right = ctk.CTkFrame(top_bar, fg_color="transparent", corner_radius=0)
+        actions_right.pack(side="right")
+
+        self.details_edit_btn = ctk.CTkButton(
+            actions_right,
+            text="Edit",
+            width=76,
+            height=34,
+            corner_radius=8,
+            fg_color=COLOR_SURFACE,
+            hover_color=COLOR_SURFACE_ELEVATED,
+            border_width=1,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY,
+            font=(FONT_FAMILY, 11, "bold"),
+            command=lambda eid=entry_id: self.open_edit_dialog(eid),
+        )
+        self.details_edit_btn.pack(side="left", padx=(0, 8))
+        _ToolTip(self.details_edit_btn, "Edit this credential")
+
+        self.details_delete_btn = ctk.CTkButton(
+            actions_right,
+            text="Delete",
+            width=82,
+            height=34,
+            corner_radius=8,
+            fg_color=COLOR_SURFACE,
+            hover_color="#3B1A22",
+            border_width=1,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_DANGER,
+            font=(FONT_FAMILY, 11, "bold"),
+            command=lambda eid=entry_id: self.handle_delete_credential(eid),
+        )
+        self.details_delete_btn.pack(side="left")
+        _ToolTip(self.details_delete_btn, "Delete this credential")
+
+        # ---- Identity Header ----
+        id_row = ctk.CTkFrame(view, fg_color="transparent", corner_radius=0)
+        id_row.pack(fill="x", pady=(0, 10))
+
+        clean_site = (site_name or "").strip()
+        first_char = clean_site[0].upper() if clean_site and clean_site[0].isalnum() else None
+
+        icon_badge = ctk.CTkFrame(
+            id_row,
+            width=46,
+            height=46,
+            corner_radius=10,
+            fg_color=COLOR_SURFACE_ELEVATED,
+            border_width=1,
+            border_color=COLOR_BORDER,
+        )
+        icon_badge.pack(side="left", padx=(0, 14))
+        icon_badge.pack_propagate(False)
+
+        if first_char:
+            ctk.CTkLabel(
+                icon_badge,
+                text=first_char,
+                font=(FONT_FAMILY, 18, "bold"),
+                text_color=COLOR_PRIMARY,
+                fg_color="transparent",
+            ).pack(expand=True)
+        else:
+            ctk.CTkLabel(
+                icon_badge,
+                text=self._icon_glyph("globe"),
+                font=self._icon_font_tuple(18),
+                text_color=COLOR_TEXT_SECONDARY,
+                fg_color="transparent",
+            ).pack(expand=True)
+
+        id_meta = ctk.CTkFrame(id_row, fg_color="transparent", corner_radius=0)
+        id_meta.pack(side="left", fill="x", expand=True)
+
+        self.details_site_title = ctk.CTkLabel(
+            id_meta,
+            text=site_name,
+            font=(FONT_FAMILY, 19, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+            anchor="w",
+        )
+        self.details_site_title.pack(anchor="w")
+
+        ctk.CTkLabel(
+            id_meta,
+            text="\u25cf  Stored locally  \u2022  Fernet encrypted",
+            font=(FONT_FAMILY, 10),
+            text_color=COLOR_SUCCESS,
+            anchor="w",
+        ).pack(anchor="w", pady=(2, 0))
+
+        # ---- Main Details Card ----
+        card = ctk.CTkFrame(
+            view,
+            corner_radius=12,
+            fg_color=COLOR_SURFACE,
+            border_width=1,
+            border_color=COLOR_BORDER,
+        )
+        card.pack(fill="both", expand=True)
+
+        ci = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
+        ci.pack(fill="both", expand=True, padx=22, pady=10)
+
+        # Field 1: Website / Application Name
+        ctk.CTkLabel(
+            ci,
+            text="WEBSITE / APPLICATION",
+            font=(FONT_FAMILY, 9, "bold"),
+            text_color=COLOR_TEXT_MUTED,
+            height=16,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 2))
+
+        self.details_site_value = ctk.CTkLabel(
+            ci,
+            text=site_name,
+            font=(FONT_FAMILY, 13, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+            height=22,
+            anchor="w",
+        )
+        self.details_site_value.pack(anchor="w", pady=(0, 10))
+
+        # Field 2: Username / Identifier + Copy Username button
+        ctk.CTkLabel(
+            ci,
+            text="USERNAME / IDENTIFIER",
+            font=(FONT_FAMILY, 9, "bold"),
+            text_color=COLOR_TEXT_MUTED,
+            height=16,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 4))
+
+        user_box = ctk.CTkFrame(
+            ci,
+            height=38,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_width=1,
+            border_color=COLOR_BORDER,
+        )
+        user_box.pack(fill="x", pady=(0, 8))
+        user_box.pack_propagate(False)
+
+        self.details_username_value = ctk.CTkLabel(
+            user_box,
+            text=username_field,
+            font=(FONT_FAMILY, 12),
+            text_color=COLOR_TEXT_PRIMARY,
+            fg_color=COLOR_INPUT,
+            anchor="w",
+        )
+        self.details_username_value.pack(side="left", fill="x", expand=True, padx=(12, 6), pady=4)
+
+        self.details_copy_user_btn = ctk.CTkButton(
+            user_box,
+            text=self._icon_glyph("copy"),
+            font=self._icon_font_tuple(13),
+            width=30,
+            height=28,
+            corner_radius=6,
+            fg_color=COLOR_INPUT,
+            hover_color=COLOR_SURFACE_ELEVATED,
+            text_color=COLOR_TEXT_SECONDARY,
+            command=lambda u=username_field: self.copy_details_username(u),
+        )
+        self.details_copy_user_btn.pack(side="right", padx=(0, 6), pady=4)
+        _ToolTip(self.details_copy_user_btn, "Copy username")
+
+        # Field 3: Password (Masked by Default, Reveal/Hide + Copy)
+        pwd_header = ctk.CTkFrame(ci, fg_color="transparent", corner_radius=0)
+        pwd_header.pack(fill="x", pady=(0, 4))
+
+        ctk.CTkLabel(
+            pwd_header,
+            text="PASSWORD",
+            font=(FONT_FAMILY, 9, "bold"),
+            text_color=COLOR_TEXT_MUTED,
+            height=16,
+            anchor="w",
+        ).pack(side="left")
+
+        self.details_feedback_label = ctk.CTkLabel(
+            pwd_header,
+            text="",
+            font=(FONT_FAMILY, 10, "bold"),
+            text_color=COLOR_SUCCESS,
+            height=16,
+            anchor="e",
+        )
+        self.details_feedback_label.pack(side="right")
+
+        pwd_box = ctk.CTkFrame(
+            ci,
+            height=38,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_width=1,
+            border_color=COLOR_BORDER,
+        )
+        pwd_box.pack(fill="x", pady=(0, 8))
+        pwd_box.pack_propagate(False)
+
+        self.details_password_label = ctk.CTkLabel(
+            pwd_box,
+            text=MASKED_PASSWORD,
+            font=(FONT_MONO, 13),
+            text_color=COLOR_TEXT_SECONDARY,
+            fg_color=COLOR_INPUT,
+            anchor="w",
+        )
+        self.details_password_label.pack(side="left", fill="x", expand=True, padx=(12, 6), pady=4)
+
+        self.details_copy_pw_btn = ctk.CTkButton(
+            pwd_box,
+            text=self._icon_glyph("copy"),
+            font=self._icon_font_tuple(13),
+            width=30,
+            height=28,
+            corner_radius=6,
+            fg_color=COLOR_INPUT,
+            hover_color=COLOR_SURFACE_ELEVATED,
+            text_color=COLOR_TEXT_SECONDARY,
+            command=self.copy_details_password,
+        )
+        self.details_copy_pw_btn.pack(side="right", padx=(2, 6), pady=4)
+        _ToolTip(self.details_copy_pw_btn, "Copy password")
+
+        self.details_toggle_pw_btn = ctk.CTkButton(
+            pwd_box,
+            text=self._icon_glyph("eye"),
+            font=self._icon_font_tuple(13),
+            width=30,
+            height=28,
+            corner_radius=6,
+            fg_color=COLOR_INPUT,
+            hover_color=COLOR_SURFACE_ELEVATED,
+            text_color=COLOR_TEXT_SECONDARY,
+            command=self.toggle_details_password,
+        )
+        self.details_toggle_pw_btn.pack(side="right", padx=(4, 2), pady=4)
+        self._details_toggle_tooltip = _ToolTip(self.details_toggle_pw_btn, "Show password")
+
+        # Field 4: Notes (read-only)
+        ctk.CTkLabel(
+            ci,
+            text="NOTES",
+            font=(FONT_FAMILY, 9, "bold"),
+            text_color=COLOR_TEXT_MUTED,
+            height=16,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 4))
+
+        notes_box = ctk.CTkTextbox(
+            ci,
+            height=54,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_width=1,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY if notes else COLOR_TEXT_MUTED,
+            font=(FONT_FAMILY, 11),
+            wrap="word",
+        )
+        notes_box.pack(fill="x", pady=(0, 10))
+        notes_box.insert("1.0", notes if notes else "No notes added.")
+        notes_box.configure(state="disabled")
+        self.details_notes_box = notes_box
+
+        # Field 5: Created & Last Updated Metadata Footer
+        ctk.CTkFrame(ci, height=1, fg_color=COLOR_BORDER, corner_radius=0).pack(
+            fill="x", pady=(0, 8)
+        )
+
+        dates_row = ctk.CTkFrame(ci, fg_color="transparent", corner_radius=0)
+        dates_row.pack(fill="x")
+        dates_row.grid_columnconfigure(0, weight=1)
+        dates_row.grid_columnconfigure(1, weight=1)
+
+        created_col = ctk.CTkFrame(dates_row, fg_color="transparent", corner_radius=0)
+        created_col.grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            created_col,
+            text="CREATED",
+            font=(FONT_FAMILY, 8, "bold"),
+            text_color=COLOR_TEXT_MUTED,
+            height=14,
+        ).pack(anchor="w")
+        self.details_created_value = ctk.CTkLabel(
+            created_col,
+            text=_format_detail_timestamp(created_at),
+            font=(FONT_FAMILY, 10),
+            text_color=COLOR_TEXT_SECONDARY,
+            height=18,
+        )
+        self.details_created_value.pack(anchor="w")
+
+        updated_col = ctk.CTkFrame(dates_row, fg_color="transparent", corner_radius=0)
+        updated_col.grid(row=0, column=1, sticky="w")
+        ctk.CTkLabel(
+            updated_col,
+            text="LAST UPDATED",
+            font=(FONT_FAMILY, 8, "bold"),
+            text_color=COLOR_TEXT_MUTED,
+            height=14,
+        ).pack(anchor="w")
+        self.details_updated_value = ctk.CTkLabel(
+            updated_col,
+            text=_format_detail_timestamp(updated_at),
+            font=(FONT_FAMILY, 10),
+            text_color=COLOR_TEXT_SECONDARY,
+            height=18,
+        )
+        self.details_updated_value.pack(anchor="w")
+
+    def _mask_details_password(self):
+        """Masks the details password display and clears any revealed plaintext from the label."""
+        self._details_password_revealed = False
+        if hasattr(self, "details_password_label") and self.details_password_label is not None:
+            try:
+                if self.details_password_label.winfo_exists():
+                    self.details_password_label.configure(
+                        text=MASKED_PASSWORD,
+                        font=(FONT_MONO, 13),
+                        text_color=COLOR_TEXT_SECONDARY,
+                    )
+            except tk.TclError:
+                pass
+        if hasattr(self, "details_toggle_pw_btn") and self.details_toggle_pw_btn is not None:
+            try:
+                if self.details_toggle_pw_btn.winfo_exists():
+                    self.details_toggle_pw_btn.configure(text=self._icon_glyph("eye"))
+            except tk.TclError:
+                pass
+        if hasattr(self, "_details_toggle_tooltip") and self._details_toggle_tooltip is not None:
+            self._details_toggle_tooltip.text = "Show password"
+
+    def _show_details_feedback(self, message, color=COLOR_SUCCESS):
+        """Displays brief inline feedback in the details view without using messagebox."""
+        if self._details_feedback_job is not None:
+            try:
+                self.root.after_cancel(self._details_feedback_job)
+            except tk.TclError:
+                pass
+            self._details_feedback_job = None
+
+        if hasattr(self, "details_feedback_label") and self.details_feedback_label is not None:
+            try:
+                if self.details_feedback_label.winfo_exists():
+                    self.details_feedback_label.configure(text=message, text_color=color)
+                    self._details_feedback_job = self.root.after(1500, self._clear_details_feedback)
+            except tk.TclError:
+                pass
+
+    def _clear_details_feedback(self):
+        self._details_feedback_job = None
+        if hasattr(self, "details_feedback_label") and self.details_feedback_label is not None:
+            try:
+                if self.details_feedback_label.winfo_exists():
+                    self.details_feedback_label.configure(text="")
+            except tk.TclError:
+                pass
+
+    def toggle_details_password(self):
+        """Explicitly decrypts and reveals only the active entry's password, or masks it again."""
+        if self._details_entry_id is None:
+            return
+        if self._details_password_revealed:
+            self._mask_details_password()
+            return
+
+        password = vault.get_credential_password(
+            self.current_user_id,
+            self._details_entry_id,
+            self.current_encryption_key,
+        )
+        if password is None:
+            self._show_details_feedback("Failed to retrieve password.", color=COLOR_DANGER)
+            return
+
+        if hasattr(self, "details_password_label") and self.details_password_label.winfo_exists():
+            self.details_password_label.configure(
+                text=password,
+                font=(FONT_MONO, 13, "bold"),
+                text_color=COLOR_TEXT_PRIMARY,
+            )
+            self._details_password_revealed = True
+            if hasattr(self, "details_toggle_pw_btn") and self.details_toggle_pw_btn.winfo_exists():
+                self.details_toggle_pw_btn.configure(text=self._icon_glyph("hide"))
+            if hasattr(self, "_details_toggle_tooltip") and self._details_toggle_tooltip is not None:
+                self._details_toggle_tooltip.text = "Hide password"
+
+    def copy_details_password(self):
+        """Explicitly retrieves and copies only the active entry's password to clipboard."""
+        if self._details_entry_id is None:
+            return
+        self.handle_copy_password(self._details_entry_id)
+
+    def copy_details_username(self, username_text):
+        """Copies the displayed username/identifier to clipboard with inline feedback."""
+        if not username_text:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(username_text)
+        self.root.update()
+        self._show_details_feedback("Username copied to clipboard", color=COLOR_SUCCESS)
+
+    def close_credential_details(self):
+        """Masks/clears password state, closes details view, and returns to the vault list."""
+        self._mask_details_password()
+        if self._details_feedback_job is not None:
+            try:
+                self.root.after_cancel(self._details_feedback_job)
+            except tk.TclError:
+                pass
+            self._details_feedback_job = None
+
+        if self._details_view is not None:
+            try:
+                if self._details_view.winfo_exists():
+                    self._details_view.destroy()
+            except tk.TclError:
+                pass
+            self._details_view = None
+
+        self._details_entry_id = None
+        if self._vault_list_view is not None:
+            try:
+                if self._vault_list_view.winfo_exists() and not self._vault_list_view.winfo_manager():
+                    self._vault_list_view.pack(fill="both", expand=True)
+            except tk.TclError:
+                pass
 
     def update_action_button_states(self):
         """Retained for compatibility; dashboard row selection manages visual state."""
         return None
 
     # ----------------------------------------------------------------------
-    # 4. Add Credential Dialog
+    # 4 & 5. Add / Edit Credential Dialogs  (CustomTkinter)
     # ----------------------------------------------------------------------
-    def open_add_dialog(self):
+    def _open_credential_dialog(self, mode="add", target=None):
+        """
+        Shared CustomTkinter modal for adding or editing a credential.
+        Editing never decrypts or reads the existing password.
+        """
+        is_edit = mode == "edit"
+        if is_edit and target is None:
+            return
+
         if self.active_dialog and self.active_dialog.winfo_exists():
             self.active_dialog.destroy()
 
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Onesium — Add Credential")
-        dialog.resizable(False, False)
-        dialog.configure(bg=COLOR_BG)
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("Onesium — Edit Credential" if is_edit else "Onesium — Add Credential")
+        dialog.configure(fg_color=COLOR_BG)
         dialog.transient(self.root)
         dialog.grab_set()
         self.active_dialog = dialog
-        center_window(dialog, 430, 490, self.root)
+        dlg_h = 600 if is_edit else 575
+        center_window(dialog, 450, dlg_h, self.root)
+        dialog.resizable(False, False)
 
-        frame = ttk.Frame(dialog, padding=20)
-        frame.pack(fill="both", expand=True)
+        def close_dialog():
+            dialog.destroy()
+            self.active_dialog = None
+
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+
+        outer = ctk.CTkFrame(dialog, fg_color=COLOR_BG, corner_radius=0)
+        outer.pack(fill="both", expand=True, padx=22, pady=18)
 
         # Header
-        header_box = tk.Frame(frame, bg=COLOR_BG)
-        header_box.pack(fill="x", pady=(0, 10))
-        tk.Label(header_box, text="Add Credential", font=(FONT_FAMILY, 12, "bold"), bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY).pack(anchor="w")
-        tk.Label(header_box, text="Store credentials locally on this device.", font=(FONT_FAMILY, 8), bg=COLOR_BG, fg=COLOR_TEXT_MUTED).pack(anchor="w")
+        ctk.CTkLabel(
+            outer,
+            text="Edit Credential" if is_edit else "Add Credential",
+            font=(FONT_FAMILY, 17, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+            anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            outer,
+            text=(
+                "Update credential metadata and set a replacement password."
+                if is_edit
+                else "Store credentials encrypted locally on this device."
+            ),
+            font=(FONT_FAMILY, 10),
+            text_color=COLOR_TEXT_SECONDARY,
+            anchor="w",
+        ).pack(anchor="w", pady=(2, 12))
 
-        # Field 1: Site / App (Direct child of frame)
-        ttk.Label(frame, text="Site / App:").pack(anchor="w", pady=(0, 2))
-        site_entry = ttk.Entry(frame, width=35)
-        site_entry.pack(fill="x", pady=(0, 8))
+        card = ctk.CTkFrame(
+            outer,
+            corner_radius=12,
+            fg_color=COLOR_SURFACE,
+            border_width=1,
+            border_color=COLOR_BORDER,
+        )
+        card.pack(fill="both", expand=True)
+
+        ci = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
+        ci.pack(fill="both", expand=True, padx=18, pady=16)
+
+        # Field 1: Site / App
+        ctk.CTkLabel(
+            ci, text="Site / App",
+            font=(FONT_FAMILY, 10, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 4))
+        site_entry = ctk.CTkEntry(
+            ci,
+            height=36,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY,
+        )
+        if is_edit:
+            site_entry.insert(0, target["site_name"])
+        site_entry.pack(fill="x", pady=(0, 10))
         site_entry.focus()
 
-        # Field 2: Username / Identifier (Direct child of frame)
-        ttk.Label(frame, text="Username / Identifier:").pack(anchor="w", pady=(0, 2))
-        user_entry = ttk.Entry(frame, width=35)
-        user_entry.pack(fill="x", pady=(0, 8))
+        # Field 2: Username / Identifier
+        ctk.CTkLabel(
+            ci, text="Username / Identifier",
+            font=(FONT_FAMILY, 10, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 4))
+        user_entry = ctk.CTkEntry(
+            ci,
+            height=36,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY,
+        )
+        if is_edit:
+            user_entry.insert(0, target["username_field"])
+        user_entry.pack(fill="x", pady=(0, 10))
 
-        # Field 3: Password Header + Generate & Eye Buttons
-        pwd_header_frame = ttk.Frame(frame)
-        pwd_header_frame.pack(fill="x", pady=(0, 2))
+        # Field 3: Password Header + Show/Hide + Generate
+        pwd_header = ctk.CTkFrame(ci, fg_color="transparent", corner_radius=0)
+        pwd_header.pack(fill="x", pady=(0, 4))
 
-        ttk.Label(pwd_header_frame, text="Password:").pack(side="left")
+        ctk.CTkLabel(
+            pwd_header,
+            text="New Password" if is_edit else "Password",
+            font=(FONT_FAMILY, 10, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).pack(side="left")
+
+        pwd_var = tk.StringVar()
+        _pw_shown = [False]
+
+        def toggle_dlg_pw():
+            if _pw_shown[0]:
+                pwd_entry.configure(show="*")
+                eye_btn.configure(text="Show")
+                _pw_shown[0] = False
+            else:
+                pwd_entry.configure(show="")
+                eye_btn.configure(text="Hide")
+                _pw_shown[0] = True
 
         def generate_pwd():
             gen = password_utils.generate_password()
             pwd_entry.delete(0, tk.END)
             pwd_entry.insert(0, gen)
 
-        gen_btn = ttk.Button(pwd_header_frame, text="Generate", command=generate_pwd)
+        gen_btn = ctk.CTkButton(
+            pwd_header,
+            text="Generate",
+            width=74,
+            height=24,
+            corner_radius=5,
+            fg_color=COLOR_SURFACE_ELEVATED,
+            hover_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY,
+            font=(FONT_FAMILY, 9, "bold"),
+            command=generate_pwd,
+        )
         gen_btn.pack(side="right")
 
-        eye_btn = tk.Button(
-            pwd_header_frame,
+        eye_btn = ctk.CTkButton(
+            pwd_header,
             text="Show",
-            font=(FONT_FAMILY, 8),
-            bg=COLOR_SURFACE_ELEVATED,
-            fg=COLOR_TEXT_MUTED,
-            activebackground="#2A344A",
-            activeforeground=COLOR_TEXT_PRIMARY,
-            bd=1,
-            relief="solid",
-            padx=5,
-            pady=0,
-            cursor="hand2",
-            command=lambda: self._toggle_show(pwd_entry, eye_btn),
+            width=54,
+            height=24,
+            corner_radius=5,
+            fg_color=COLOR_SURFACE_ELEVATED,
+            hover_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_SECONDARY,
+            font=(FONT_FAMILY, 9),
+            command=toggle_dlg_pw,
         )
         eye_btn.pack(side="right", padx=(0, 6))
 
-        # Password Entry Field (Direct child of frame with show="*")
-        pwd_var = tk.StringVar()
-        pwd_entry = ttk.Entry(frame, textvariable=pwd_var, show="*", width=35)
-        pwd_entry.pack(fill="x", pady=(0, 2))
+        pwd_entry = ctk.CTkEntry(
+            ci,
+            textvariable=pwd_var,
+            height=36,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY,
+        )
+        pwd_entry.pack(fill="x", pady=(0, 4))
+        pwd_entry.configure(show="*")
 
-        # Strength & Common Warning Indicator (Direct children of frame)
-        strength_label = ttk.Label(frame, text="Strength: Very Weak", font=("Helvetica", 8, "bold"))
+        if is_edit:
+            ctk.CTkLabel(
+                ci,
+                text="Existing password is never decrypted. Enter a replacement to save.",
+                font=(FONT_FAMILY, 9),
+                text_color=COLOR_TEXT_MUTED,
+            ).pack(anchor="w", pady=(0, 2))
+
+        strength_label = ctk.CTkLabel(
+            ci,
+            text="Strength: Very Weak",
+            font=(FONT_FAMILY, 9, "bold"),
+            text_color=COLOR_DANGER,
+        )
         strength_label.pack(anchor="w", pady=(2, 1))
 
-        common_warn_label = tk.Label(frame, text="", fg="#d9534f", bg=COLOR_BG, font=("Helvetica", 8))
+        common_warn_label = ctk.CTkLabel(
+            ci,
+            text="",
+            font=(FONT_FAMILY, 9),
+            text_color=COLOR_DANGER,
+        )
         common_warn_label.pack(anchor="w", pady=(0, 6))
 
-        def update_pwd_feedback(*args):
+        def update_pwd_feedback(*_args):
             val = pwd_var.get()
-            strength_res = password_utils.check_password_strength(val)
-            strength_label.config(text=f"Strength: {strength_res['label']}")
+            res = password_utils.check_password_strength(val)
+            color = _STRENGTH_COLORS.get(res["label"], COLOR_TEXT_SECONDARY)
+            strength_label.configure(text=f"Strength: {res['label']}", text_color=color)
             if password_utils.is_common_password(val):
-                common_warn_label.config(text="Warning: This is a commonly used password.")
+                common_warn_label.configure(text="\u26a0  This is a commonly used password.")
             else:
-                common_warn_label.config(text="")
+                common_warn_label.configure(text="")
 
         pwd_var.trace_add("write", update_pwd_feedback)
 
-        # Field 4: Notes (Direct child of frame)
-        ttk.Label(frame, text="Notes (Optional):").pack(anchor="w", pady=(0, 2))
-        notes_entry = ttk.Entry(frame, width=35)
+        # Field 4: Notes
+        ctk.CTkLabel(
+            ci, text="Notes (Optional)",
+            font=(FONT_FAMILY, 10, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 4))
+        notes_entry = ctk.CTkEntry(
+            ci,
+            height=36,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY,
+        )
+        if is_edit:
+            notes_entry.insert(0, target["notes"] or "")
         notes_entry.pack(fill="x", pady=(0, 8))
 
-        # Status & Error Message Label
-        status_label = tk.Label(frame, text="", fg="red", bg=COLOR_BG, font=("Helvetica", 9), wraplength=360)
+        status_label = ctk.CTkLabel(
+            ci,
+            text="",
+            text_color=COLOR_DANGER,
+            font=(FONT_FAMILY, 9),
+            wraplength=360,
+        )
         status_label.pack(pady=(0, 8))
 
-        # Action Buttons Row
-        btn_frame = ttk.Frame(frame)
-        btn_frame.pack(fill="x")
+        btn_row = ctk.CTkFrame(ci, fg_color="transparent", corner_radius=0)
+        btn_row.pack(fill="x", pady=(2, 0))
 
-        def save_add():
+        def save_credential():
             site_name = site_entry.get().strip()
             username = user_entry.get().strip()
             password = pwd_entry.get()
             notes = notes_entry.get().strip()
 
             if not site_name:
-                status_label.config(text="Site name cannot be empty.")
+                status_label.configure(text="Site name cannot be empty.")
                 return
             if not username:
-                status_label.config(text="Username cannot be empty.")
+                status_label.configure(text="Username cannot be empty.")
                 return
             if not password:
-                status_label.config(text="Password cannot be empty.")
+                status_label.configure(text="Password cannot be empty.")
                 return
 
             try:
-                vault.add_credential(
-                    user_id=self.current_user_id,
-                    key=self.current_encryption_key,
-                    site_name=site_name,
-                    username=username,
-                    password=password,
-                    notes=notes,
-                )
+                if is_edit:
+                    ok = vault.update_credential(
+                        user_id=self.current_user_id,
+                        entry_id=target["entry_id"],
+                        key=self.current_encryption_key,
+                        site_name=site_name,
+                        username=username,
+                        password=password,
+                        notes=notes,
+                    )
+                    if not ok:
+                        status_label.configure(text="Failed to update credential.")
+                        return
+                else:
+                    vault.add_credential(
+                        user_id=self.current_user_id,
+                        key=self.current_encryption_key,
+                        site_name=site_name,
+                        username=username,
+                        password=password,
+                        notes=notes,
+                    )
             except (ValueError, TypeError) as e:
-                status_label.config(text=str(e))
+                status_label.configure(text=str(e))
                 return
 
-            dialog.destroy()
-            self.active_dialog = None
+            editing_id = target["entry_id"] if is_edit else None
+            was_viewing_details = (
+                is_edit
+                and self._details_view is not None
+                and self._details_view.winfo_exists()
+                and self._details_entry_id == editing_id
+            )
+            close_dialog()
             self.refresh_credential_list()
+            if was_viewing_details and editing_id is not None:
+                self.selected_entry_id = editing_id
+                self.open_credential_details(editing_id)
 
-        def cancel_add():
-            dialog.destroy()
-            self.active_dialog = None
+        save_btn = ctk.CTkButton(
+            btn_row,
+            text="Save",
+            height=38,
+            width=120,
+            corner_radius=8,
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_PRIMARY_HOVER,
+            text_color="#FFFFFF",
+            font=(FONT_FAMILY, 11, "bold"),
+            command=save_credential,
+        )
+        save_btn.pack(side="left", padx=(0, 8))
 
-        dialog.protocol("WM_DELETE_WINDOW", cancel_add)
-
-        save_btn = ttk.Button(btn_frame, text="Save", style="Primary.TButton", command=save_add)
-        save_btn.pack(side="left", padx=(0, 6))
-
-        cancel_btn = ttk.Button(btn_frame, text="Cancel", command=cancel_add)
+        cancel_btn = ctk.CTkButton(
+            btn_row,
+            text="Cancel",
+            height=38,
+            width=100,
+            corner_radius=8,
+            fg_color=COLOR_SURFACE_ELEVATED,
+            hover_color=COLOR_BORDER,
+            border_width=1,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY,
+            font=(FONT_FAMILY, 11),
+            command=close_dialog,
+        )
         cancel_btn.pack(side="left")
 
-    # ----------------------------------------------------------------------
-    # 5. Edit Credential Dialog
-    # ----------------------------------------------------------------------
-    def open_edit_dialog(self):
-        if self.selected_entry_id is None:
+    def open_add_dialog(self):
+        self._open_credential_dialog(mode="add")
+
+    def open_edit_dialog(self, entry_id=None):
+        target_id = entry_id if entry_id is not None else self.selected_entry_id
+        if target_id is None:
             return
-
-        entries = vault.get_credentials(self.current_user_id)
-        target = None
-        for entry in entries:
-            if entry["entry_id"] == self.selected_entry_id:
-                target = entry
-                break
-
+        target = self._find_user_credential(target_id)
         if target is None:
             return
-
-        if self.active_dialog and self.active_dialog.winfo_exists():
-            self.active_dialog.destroy()
-
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Onesium — Edit Credential")
-        dialog.resizable(False, False)
-        dialog.configure(bg=COLOR_BG)
-        dialog.transient(self.root)
-        dialog.grab_set()
-        self.active_dialog = dialog
-        center_window(dialog, 430, 510, self.root)
-
-        def cancel_edit():
-            dialog.destroy()
-            self.active_dialog = None
-
-        dialog.protocol("WM_DELETE_WINDOW", cancel_edit)
-
-        frame = ttk.Frame(dialog, padding=20)
-        frame.pack(fill="both", expand=True)
-
-        # Header
-        header_box = tk.Frame(frame, bg=COLOR_BG)
-        header_box.pack(fill="x", pady=(0, 10))
-        tk.Label(header_box, text="Edit Credential", font=(FONT_FAMILY, 12, "bold"), bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY).pack(anchor="w")
-        tk.Label(header_box, text="Update credential stored in encrypted local vault.", font=(FONT_FAMILY, 8), bg=COLOR_BG, fg=COLOR_TEXT_MUTED).pack(anchor="w")
-
-        # Field 1: Site / App (Direct child of frame)
-        ttk.Label(frame, text="Site / App:").pack(anchor="w", pady=(0, 2))
-        site_entry = ttk.Entry(frame, width=35)
-        site_entry.insert(0, target["site_name"])
-        site_entry.pack(fill="x", pady=(0, 8))
-        site_entry.focus()
-
-        # Field 2: Username / Identifier (Direct child of frame)
-        ttk.Label(frame, text="Username / Identifier:").pack(anchor="w", pady=(0, 2))
-        user_entry = ttk.Entry(frame, width=35)
-        user_entry.insert(0, target["username_field"])
-        user_entry.pack(fill="x", pady=(0, 8))
-
-        # Field 3: Password Header + Regenerate & Eye Buttons
-        pwd_header_frame = ttk.Frame(frame)
-        pwd_header_frame.pack(fill="x", pady=(0, 2))
-
-        ttk.Label(pwd_header_frame, text="New Password:").pack(side="left")
-
-        def regenerate_pwd():
-            gen = password_utils.generate_password()
-            pwd_entry.delete(0, tk.END)
-            pwd_entry.insert(0, gen)
-
-        gen_btn = ttk.Button(pwd_header_frame, text="Generate", command=regenerate_pwd)
-        gen_btn.pack(side="right")
-
-        eye_btn = tk.Button(
-            pwd_header_frame,
-            text="Show",
-            font=(FONT_FAMILY, 8),
-            bg=COLOR_SURFACE_ELEVATED,
-            fg=COLOR_TEXT_MUTED,
-            activebackground="#2A344A",
-            activeforeground=COLOR_TEXT_PRIMARY,
-            bd=1,
-            relief="solid",
-            padx=5,
-            pady=0,
-            cursor="hand2",
-            command=lambda: self._toggle_show(pwd_entry, eye_btn),
-        )
-        eye_btn.pack(side="right", padx=(0, 6))
-
-        # Password Entry Field (Direct child of frame with show="*")
-        pwd_var = tk.StringVar()
-        pwd_entry = ttk.Entry(frame, textvariable=pwd_var, show="*", width=35)
-        pwd_entry.pack(fill="x", pady=(0, 2))
-
-        # Subtitle reminder that existing password is never decrypted
-        info_lbl = tk.Label(frame, text="(Enter replacement password to save changes)", font=(FONT_FAMILY, 8), bg=COLOR_BG, fg=COLOR_TEXT_MUTED)
-        info_lbl.pack(anchor="w", pady=(0, 2))
-
-        # Strength & Common Warning Indicator (Direct children of frame)
-        strength_label = ttk.Label(frame, text="Strength: Very Weak", font=("Helvetica", 8, "bold"))
-        strength_label.pack(anchor="w", pady=(2, 1))
-
-        common_warn_label = tk.Label(frame, text="", fg="#d9534f", bg=COLOR_BG, font=("Helvetica", 8))
-        common_warn_label.pack(anchor="w", pady=(0, 6))
-
-        def update_pwd_feedback(*args):
-            val = pwd_var.get()
-            strength_res = password_utils.check_password_strength(val)
-            strength_label.config(text=f"Strength: {strength_res['label']}")
-            if password_utils.is_common_password(val):
-                common_warn_label.config(text="Warning: This is a commonly used password.")
-            else:
-                common_warn_label.config(text="")
-
-        pwd_var.trace_add("write", update_pwd_feedback)
-
-        # Field 4: Notes (Direct child of frame)
-        ttk.Label(frame, text="Notes (Optional):").pack(anchor="w", pady=(0, 2))
-        notes_entry = ttk.Entry(frame, width=35)
-        notes_entry.insert(0, target["notes"] or "")
-        notes_entry.pack(fill="x", pady=(0, 8))
-
-        # Status & Error Message Label
-        status_label = tk.Label(frame, text="", fg="red", bg=COLOR_BG, font=("Helvetica", 9), wraplength=360)
-        status_label.pack(pady=(0, 8))
-
-        # Action Buttons Row
-        btn_frame = ttk.Frame(frame)
-        btn_frame.pack(fill="x")
-
-        def save_edit():
-            site_name = site_entry.get().strip()
-            username = user_entry.get().strip()
-            password = pwd_entry.get()
-            notes = notes_entry.get().strip()
-
-            if not site_name:
-                status_label.config(text="Site name cannot be empty.")
-                return
-            if not username:
-                status_label.config(text="Username cannot be empty.")
-                return
-            if not password:
-                status_label.config(text="Password cannot be empty.")
-                return
-
-            try:
-                ok = vault.update_credential(
-                    user_id=self.current_user_id,
-                    entry_id=target["entry_id"],
-                    key=self.current_encryption_key,
-                    site_name=site_name,
-                    username=username,
-                    password=password,
-                    notes=notes,
-                )
-            except (ValueError, TypeError) as e:
-                status_label.config(text=str(e))
-                return
-
-            if not ok:
-                status_label.config(text="Failed to update credential.")
-                return
-
-            dialog.destroy()
-            self.active_dialog = None
-            self.refresh_credential_list()
-
-        save_btn = ttk.Button(btn_frame, text="Save", style="Primary.TButton", command=save_edit)
-        save_btn.pack(side="left", padx=(0, 6))
-
-        cancel_btn = ttk.Button(btn_frame, text="Cancel", command=cancel_edit)
-        cancel_btn.pack(side="left")
+        self._open_credential_dialog(mode="edit", target=target)
 
     # ----------------------------------------------------------------------
-    # 6. Standalone Password Generator Tool Dialog
+    # 6. Standalone Password Generator Tool Dialog  (CustomTkinter)
     # ----------------------------------------------------------------------
     def open_generator_dialog(self):
         """Opens a dedicated generator modal styled with the Onesium palette."""
         if self.active_dialog and self.active_dialog.winfo_exists():
             self.active_dialog.destroy()
 
-        dialog = tk.Toplevel(self.root)
+        dialog = ctk.CTkToplevel(self.root)
         dialog.title("Onesium — Password Generator")
-        dialog.resizable(False, False)
-        dialog.configure(bg=COLOR_BG)
+        dialog.configure(fg_color=COLOR_BG)
         dialog.transient(self.root)
         dialog.grab_set()
         self.active_dialog = dialog
-        center_window(dialog, 400, 320, self.root)
+        center_window(dialog, 420, 320, self.root)
+        dialog.resizable(False, False)
 
         def close_generator():
             dialog.destroy()
@@ -2143,58 +2798,86 @@ class PasswordManagerApp:
 
         dialog.protocol("WM_DELETE_WINDOW", close_generator)
 
-        frame = tk.Frame(
+        card = ctk.CTkFrame(
             dialog,
-            bg=COLOR_SURFACE,
-            padx=18,
-            pady=16,
-            bd=1,
-            relief="solid",
-            highlightbackground=COLOR_BORDER,
-            highlightthickness=1,
+            corner_radius=12,
+            fg_color=COLOR_SURFACE,
+            border_width=1,
+            border_color=COLOR_BORDER,
         )
-        frame.pack(fill="both", expand=True, padx=14, pady=14)
+        card.pack(fill="both", expand=True, padx=18, pady=18)
 
-        tk.Label(frame, text="Password Generator", font=(FONT_FAMILY, 12, "bold"), bg=COLOR_SURFACE, fg=COLOR_TEXT_PRIMARY).pack(anchor="w", pady=(0, 8))
+        ci = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
+        ci.pack(fill="both", expand=True, padx=18, pady=16)
 
-        # Result field
-        pwd_box = tk.Entry(
-            frame,
-            font=(FONT_MONO, 11, "bold"),
-            bg=COLOR_INPUT,
-            fg=COLOR_SUCCESS,
-            insertbackground=COLOR_TEXT_PRIMARY,
-            bd=1,
-            relief="solid",
-            highlightbackground=COLOR_BORDER,
-            highlightthickness=1,
+        ctk.CTkLabel(
+            ci,
+            text="Password Generator",
+            font=(FONT_FAMILY, 15, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 12))
+
+        pwd_box = ctk.CTkEntry(
+            ci,
+            height=42,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_SUCCESS,
+            font=(FONT_MONO, 13, "bold"),
             justify="center",
         )
-        pwd_box.pack(fill="x", pady=(0, 10), ipady=4)
+        pwd_box.pack(fill="x", pady=(0, 12))
 
-        # Length selector
-        len_row = tk.Frame(frame, bg=COLOR_SURFACE)
+        len_row = ctk.CTkFrame(ci, fg_color="transparent", corner_radius=0)
         len_row.pack(fill="x", pady=(0, 10))
 
-        tk.Label(len_row, text="Length:", font=(FONT_FAMILY, 9), bg=COLOR_SURFACE, fg=COLOR_TEXT_MUTED).pack(side="left")
         len_var = tk.IntVar(value=16)
-        len_spin = ttk.Spinbox(len_row, from_=8, to=64, textvariable=len_var, width=5)
-        len_spin.pack(side="left", padx=(8, 0))
+        len_value_lbl = ctk.CTkLabel(
+            len_row,
+            text="Length: 16",
+            font=(FONT_FAMILY, 10, "bold"),
+            text_color=COLOR_TEXT_SECONDARY,
+            width=76,
+            anchor="w",
+        )
+        len_value_lbl.pack(side="left", padx=(0, 10))
 
-        # Strength readout
-        gen_strength_lbl = tk.Label(frame, text="Strength: Very Strong", font=(FONT_FAMILY, 9, "bold"), bg=COLOR_SURFACE, fg=COLOR_SUCCESS)
-        gen_strength_lbl.pack(anchor="w", pady=(0, 10))
+        gen_strength_lbl = ctk.CTkLabel(
+            ci,
+            text="Strength: Very Strong",
+            font=(FONT_FAMILY, 10, "bold"),
+            text_color=COLOR_SUCCESS,
+            anchor="w",
+        )
+        gen_strength_lbl.pack(anchor="w", pady=(0, 14))
 
-        def generate_new():
+        def generate_new(*_args):
             try:
-                l = len_var.get()
-                p = password_utils.generate_password(l)
+                length = int(len_var.get())
+                len_value_lbl.configure(text=f"Length: {length}")
+                p = password_utils.generate_password(length)
                 pwd_box.delete(0, tk.END)
                 pwd_box.insert(0, p)
                 st = password_utils.check_password_strength(p)
-                gen_strength_lbl.config(text=f"Strength: {st['label']}")
+                color = _STRENGTH_COLORS.get(st["label"], COLOR_SUCCESS)
+                gen_strength_lbl.configure(text=f"Strength: {st['label']}", text_color=color)
             except Exception as e:
-                gen_strength_lbl.config(text=f"Error: {e}")
+                gen_strength_lbl.configure(text=f"Error: {e}", text_color=COLOR_DANGER)
+
+        len_slider = ctk.CTkSlider(
+            len_row,
+            from_=8,
+            to=64,
+            number_of_steps=56,
+            variable=len_var,
+            button_color=COLOR_PRIMARY,
+            button_hover_color=COLOR_PRIMARY_HOVER,
+            progress_color=COLOR_PRIMARY,
+            command=lambda _v: generate_new(),
+        )
+        len_slider.pack(side="left", fill="x", expand=True)
 
         def copy_generated():
             val = pwd_box.get()
@@ -2202,82 +2885,123 @@ class PasswordManagerApp:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(val)
                 self.root.update()
-                copy_btn.config(text="Copied!")
-                dialog.after(1500, lambda: copy_btn.config(text="Copy to Clipboard"))
+                copy_btn.configure(text="Copied!")
+                dialog.after(
+                    1500,
+                    lambda: copy_btn.configure(text="Copy to Clipboard")
+                    if copy_btn.winfo_exists()
+                    else None,
+                )
 
         generate_new()
 
-        btn_row = tk.Frame(frame, bg=COLOR_SURFACE)
+        btn_row = ctk.CTkFrame(ci, fg_color="transparent", corner_radius=0)
         btn_row.pack(fill="x", pady=(4, 0))
 
-        regen_btn = ttk.Button(btn_row, text="Regenerate", command=generate_new)
-        regen_btn.pack(side="left", padx=(0, 6))
+        regen_btn = ctk.CTkButton(
+            btn_row,
+            text="Regenerate",
+            height=36,
+            width=102,
+            corner_radius=8,
+            fg_color=COLOR_SURFACE_ELEVATED,
+            hover_color=COLOR_BORDER,
+            border_width=1,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY,
+            font=(FONT_FAMILY, 10, "bold"),
+            command=generate_new,
+        )
+        regen_btn.pack(side="left", padx=(0, 8))
 
-        copy_btn = ttk.Button(btn_row, text="Copy to Clipboard", style="Primary.TButton", command=copy_generated)
-        copy_btn.pack(side="left", padx=(0, 6))
+        copy_btn = ctk.CTkButton(
+            btn_row,
+            text="Copy to Clipboard",
+            height=36,
+            width=142,
+            corner_radius=8,
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_PRIMARY_HOVER,
+            text_color="#FFFFFF",
+            font=(FONT_FAMILY, 10, "bold"),
+            command=copy_generated,
+        )
+        copy_btn.pack(side="left", padx=(0, 8))
 
-        close_btn = ttk.Button(btn_row, text="Close", command=close_generator)
+        close_btn = ctk.CTkButton(
+            btn_row,
+            text="Close",
+            height=36,
+            width=76,
+            corner_radius=8,
+            fg_color=COLOR_SURFACE_ELEVATED,
+            hover_color=COLOR_BORDER,
+            border_width=1,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY,
+            font=(FONT_FAMILY, 10),
+            command=close_generator,
+        )
         close_btn.pack(side="right")
 
     # ----------------------------------------------------------------------
     # 7. Delete Credential
     # ----------------------------------------------------------------------
-    def handle_delete_credential(self):
-        if self.selected_entry_id is None:
+    def handle_delete_credential(self, entry_id=None):
+        target_id = entry_id if entry_id is not None else self.selected_entry_id
+        if target_id is None:
             return
+
+        site_label = "this credential"
+        if target_id in self.row_widgets:
+            site_label = f"'{self.row_widgets[target_id]['site_name']}'"
+        else:
+            target = self._find_user_credential(target_id)
+            if target is not None:
+                site_label = f"'{target['site_name']}'"
 
         confirmed = messagebox.askyesno(
             "Confirm Deletion",
-            "Delete this credential?\nThis action cannot be undone.",
+            f"Delete {site_label}?\nThis action cannot be undone.",
             parent=self.root,
         )
         if not confirmed:
             return
 
-        ok = vault.delete_credential(self.current_user_id, self.selected_entry_id)
+        ok = vault.delete_credential(self.current_user_id, target_id)
         if ok:
+            if self._details_entry_id == target_id or self._details_view is not None:
+                self.close_credential_details()
             self.selected_entry_id = None
             self.refresh_credential_list()
         else:
             messagebox.showerror("Error", "Failed to delete credential.", parent=self.root)
 
     # ----------------------------------------------------------------------
-    # 8. Show & Copy Password Actions
+    # 8. Copy Password Action (Never displays passwords via messagebox)
     # ----------------------------------------------------------------------
-    def handle_show_password(self):
-        if self.selected_entry_id is None:
-            return
+    def handle_copy_password(self, entry_id=None):
+        target_id = entry_id if entry_id is not None else self.selected_entry_id
+        if target_id is None:
+            return False
 
         password = vault.get_credential_password(
             self.current_user_id,
-            self.selected_entry_id,
+            target_id,
             self.current_encryption_key,
         )
 
         if password is None:
-            messagebox.showerror("Error", "Failed to retrieve password.", parent=self.root)
-            return
-
-        messagebox.showinfo("Password", f"Password:\n{password}", parent=self.root)
-
-    def handle_copy_password(self):
-        if self.selected_entry_id is None:
-            return
-
-        password = vault.get_credential_password(
-            self.current_user_id,
-            self.selected_entry_id,
-            self.current_encryption_key,
-        )
-
-        if password is None:
-            messagebox.showerror("Error", "Failed to retrieve password.", parent=self.root)
-            return
+            if self._details_view is not None and self._details_view.winfo_exists():
+                self._show_details_feedback("Failed to retrieve password.", color=COLOR_DANGER)
+            return False
 
         self.root.clipboard_clear()
         self.root.clipboard_append(password)
         self.root.update()
-        messagebox.showinfo("Success", "Password copied to clipboard.", parent=self.root)
+        if self._details_view is not None and self._details_view.winfo_exists():
+            self._show_details_feedback("Password copied to clipboard", color=COLOR_SUCCESS)
+        return True
 
     # ----------------------------------------------------------------------
     # 9. Backup & Restore Actions
@@ -2359,8 +3083,16 @@ class PasswordManagerApp:
             self.auto_lock_job = None
 
     def _clear_session_state(self):
-        """Clears active dialogs, in-memory credentials, displayed metadata, and clipboard."""
+        """Clears active dialogs, details view, in-memory credentials, metadata, and clipboard."""
         self.cancel_auto_lock_timer()
+
+        self._mask_details_password()
+        if self._details_feedback_job is not None:
+            try:
+                self.root.after_cancel(self._details_feedback_job)
+            except tk.TclError:
+                pass
+            self._details_feedback_job = None
 
         if self.active_dialog and self.active_dialog.winfo_exists():
             self.active_dialog.destroy()
@@ -2374,6 +3106,9 @@ class PasswordManagerApp:
         self.row_widgets = {}
         self._total_credential_count = 0
         self._last_search_query = ""
+        self._details_view = None
+        self._details_entry_id = None
+        self._details_password_revealed = False
 
         try:
             self.root.clipboard_clear()
