@@ -2,6 +2,8 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, font as tkfont
 from datetime import datetime
+import hashlib
+import secrets
 import auth
 import vault
 import password_utils
@@ -11,6 +13,7 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 AUTO_LOCK_MS = 5 * 60 * 1000  # 5 minutes in milliseconds
+CLIPBOARD_CLEAR_MS = 30 * 1000  # 30 seconds automatic clipboard clear timeout
 
 # ---------------------------------------------------------------------------
 # Onesium Design System — Precision Vault Palette
@@ -396,7 +399,7 @@ class PasswordManagerApp:
     Manages view transitions, vault dashboard, credential operations, and in-memory session credentials.
     """
 
-    def __init__(self, root):
+    def __init__(self, root, startup_notice="", startup_notice_is_success=False):
         self.root = root
         self.root.title("Onesium — The Credential Vault")
         self.root.geometry("460x560")
@@ -414,6 +417,8 @@ class PasswordManagerApp:
         self.selected_entry_id = None
         self.active_dialog = None
         self.auto_lock_job = None
+        self._clipboard_clear_job = None
+        self._clipboard_expected_digest = None
 
         # Dashboard view state (never stores plaintext passwords)
         self.row_widgets = {}
@@ -441,7 +446,10 @@ class PasswordManagerApp:
         # Centre window on screen before showing first view
         center_window(self.root, 460, 560)
 
-        self.show_login_screen()
+        self.show_login_screen(
+            initial_message=startup_notice,
+            is_success=startup_notice_is_success,
+        )
 
     def _icon_glyph(self, name):
         """Returns icon glyph matching the resolved icon font."""
@@ -995,6 +1003,7 @@ class PasswordManagerApp:
 
         if password != confirm_password:
             self.reg_status_label.configure(text="Passwords do not match.", text_color=COLOR_DANGER)
+            self.reg_confirm_entry.delete(0, tk.END)
             return
 
         try:
@@ -1008,6 +1017,8 @@ class PasswordManagerApp:
                 text="Username already exists. Please choose another.",
                 text_color=COLOR_DANGER,
             )
+            self.reg_password_entry.delete(0, tk.END)
+            self.reg_confirm_entry.delete(0, tk.END)
             return
 
         # Registration successful → return to login with green success banner
@@ -2404,6 +2415,7 @@ class PasswordManagerApp:
         """Copies the displayed username/identifier to clipboard with inline feedback."""
         if not username_text:
             return
+        self._cancel_clipboard_clear_timer()
         self.root.clipboard_clear()
         self.root.clipboard_append(username_text)
         self.root.update()
@@ -2882,9 +2894,7 @@ class PasswordManagerApp:
         def copy_generated():
             val = pwd_box.get()
             if val:
-                self.root.clipboard_clear()
-                self.root.clipboard_append(val)
-                self.root.update()
+                self._copy_secret_to_clipboard(val)
                 copy_btn.configure(text="Copied!")
                 dialog.after(
                     1500,
@@ -2978,8 +2988,49 @@ class PasswordManagerApp:
             messagebox.showerror("Error", "Failed to delete credential.", parent=self.root)
 
     # ----------------------------------------------------------------------
-    # 8. Copy Password Action (Never displays passwords via messagebox)
+    # 8. Copy Password Action & Safe Clipboard Auto-Clear
     # ----------------------------------------------------------------------
+    def _cancel_clipboard_clear_timer(self):
+        """Cancels any pending clipboard clear timeout and forgets the expected digest."""
+        if self._clipboard_clear_job is not None:
+            try:
+                self.root.after_cancel(self._clipboard_clear_job)
+            except tk.TclError:
+                pass
+            self._clipboard_clear_job = None
+        self._clipboard_expected_digest = None
+
+    def _copy_secret_to_clipboard(self, secret_text):
+        """
+        Copies a secret to the clipboard and schedules automatic clearing after
+        CLIPBOARD_CLEAR_MS using a one-way SHA-256 digest (never retaining plaintext).
+        """
+        self._cancel_clipboard_clear_timer()
+        self.root.clipboard_clear()
+        self.root.clipboard_append(secret_text)
+        self.root.update()
+        self._clipboard_expected_digest = hashlib.sha256(secret_text.encode("utf-8")).digest()
+        self._clipboard_clear_job = self.root.after(CLIPBOARD_CLEAR_MS, self._auto_clear_clipboard)
+
+    def _auto_clear_clipboard(self):
+        """Clears the clipboard only if its current contents still match the copied secret."""
+        self._clipboard_clear_job = None
+        expected = self._clipboard_expected_digest
+        self._clipboard_expected_digest = None
+        if expected is None:
+            return
+        try:
+            current = self.root.clipboard_get()
+        except tk.TclError:
+            return
+        current_digest = hashlib.sha256(current.encode("utf-8")).digest()
+        if secrets.compare_digest(current_digest, expected):
+            try:
+                self.root.clipboard_clear()
+                self.root.update()
+            except tk.TclError:
+                pass
+
     def handle_copy_password(self, entry_id=None):
         target_id = entry_id if entry_id is not None else self.selected_entry_id
         if target_id is None:
@@ -2996,11 +3047,9 @@ class PasswordManagerApp:
                 self._show_details_feedback("Failed to retrieve password.", color=COLOR_DANGER)
             return False
 
-        self.root.clipboard_clear()
-        self.root.clipboard_append(password)
-        self.root.update()
+        self._copy_secret_to_clipboard(password)
         if self._details_view is not None and self._details_view.winfo_exists():
-            self._show_details_feedback("Password copied to clipboard", color=COLOR_SUCCESS)
+            self._show_details_feedback("Password copied (clears in 30s)", color=COLOR_SUCCESS)
         return True
 
     # ----------------------------------------------------------------------
@@ -3085,6 +3134,7 @@ class PasswordManagerApp:
     def _clear_session_state(self):
         """Clears active dialogs, details view, in-memory credentials, metadata, and clipboard."""
         self.cancel_auto_lock_timer()
+        self._cancel_clipboard_clear_timer()
 
         self._mask_details_password()
         if self._details_feedback_job is not None:

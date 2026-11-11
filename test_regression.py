@@ -1506,6 +1506,267 @@ class TestCredentialDetailsAndActionsGUI(unittest.TestCase):
         for attr_val in self.app.__dict__.values():
             self.assertNotIn(pw, str(attr_val))
 
+    def test_06_safe_clipboard_auto_clear_preserves_replaced_text(self):
+        import hashlib
+        import tkinter as tk
+        import vault as vault_module
+
+        self._login_as("clip_user", "Clip!Pass#6")
+        pw = "ClipboardSecret!66"
+        eid = vault_module.add_credential(
+            self.app.current_user_id, self.app.current_encryption_key, "ClipSite", "c@local", pw
+        )
+        self.app.refresh_credential_list()
+        self._update()
+        self.app.handle_row_click(eid)
+        self._update()
+
+        # 1. Copy sets timer and stores SHA-256 digest only (never plaintext)
+        self.app.details_copy_pw_btn.invoke()
+        self._update()
+        self.assertEqual(self.root.clipboard_get(), pw)
+        self.assertIsNotNone(self.app._clipboard_clear_job)
+        self.assertEqual(
+            self.app._clipboard_expected_digest,
+            hashlib.sha256(pw.encode("utf-8")).digest(),
+        )
+        for attr_val in self.app.__dict__.values():
+            self.assertNotIn(pw, str(attr_val))
+
+        # 2. When clipboard still matches copied password, auto-clear empties it
+        self.app._auto_clear_clipboard()
+        self._update()
+        try:
+            clip_after = self.root.clipboard_get()
+        except tk.TclError:
+            clip_after = ""
+        self.assertEqual(clip_after, "")
+        self.assertIsNone(self.app._clipboard_expected_digest)
+
+        # 3. When another app replaces clipboard content, auto-clear preserves it
+        self.app.details_copy_pw_btn.invoke()
+        self._update()
+        self.root.clipboard_clear()
+        self.root.clipboard_append("ExternalUserText999")
+        self.root.update()
+
+        self.app._auto_clear_clipboard()
+        self._update()
+        self.assertEqual(self.root.clipboard_get(), "ExternalUserText999")
+
+
+# ---------------------------------------------------------------------------
+# 5. Milestone 4 Final Security & Integrity Audit Tests
+# ---------------------------------------------------------------------------
+class TestSecurityAudit(unittest.TestCase):
+    """Phase 3 audit checks: PBKDF2, Fernet storage, FK enforcement, common passwords, isolation."""
+
+    def test_pbkdf2_config_and_no_plaintext_storage(self):
+        import crypto_utils
+        import vault as vault_module
+
+        self.assertEqual(crypto_utils.PBKDF2_ITERATIONS, 600_000)
+        master = "MasterAudit!Pass1"
+        uid = auth.register_user("audit_sec_user", master, db_path=_TMP_DB)
+        self.assertIsNotNone(uid)
+        _, key = auth.login_user("audit_sec_user", master, db_path=_TMP_DB)
+
+        secret = "VaultEntrySecret!77"
+        eid = vault_module.add_credential(uid, key, "AuditBank", "me@bank.io", secret, db_path=_TMP_DB)
+        self.assertGreater(eid, 0)
+
+        conn = db_module.get_connection(_TMP_DB)
+        try:
+            fk_row = conn.execute("PRAGMA foreign_keys;").fetchone()
+            self.assertEqual(fk_row[0], 1, "PRAGMA foreign_keys must be enabled")
+
+            user_row = conn.execute("SELECT password_hash, salt FROM users WHERE user_id = ?", (uid,)).fetchone()
+            self.assertNotIn(master.encode("utf-8"), bytes(user_row["password_hash"]))
+            self.assertEqual(len(user_row["salt"]), 16)
+
+            entry_row = conn.execute(
+                "SELECT encrypted_password FROM vault_entries WHERE entry_id = ?", (eid,)
+            ).fetchone()
+            self.assertNotIn(secret.encode("utf-8"), bytes(entry_row["encrypted_password"]))
+            self.assertTrue(bytes(entry_row["encrypted_password"]).startswith(b"gAAAA"))
+        finally:
+            conn.close()
+
+    def test_cross_user_backup_restore_rejected(self):
+        import vault as vault_module
+
+        uid_a = auth.register_user("bak_sec_a", "BakA!Pass#1", db_path=_TMP_DB)
+        _, key_a = auth.login_user("bak_sec_a", "BakA!Pass#1", db_path=_TMP_DB)
+        uid_b = auth.register_user("bak_sec_b", "BakB!Pass#2", db_path=_TMP_DB)
+        _, key_b = auth.login_user("bak_sec_b", "BakB!Pass#2", db_path=_TMP_DB)
+
+        vault_module.add_credential(uid_a, key_a, "BankA", "a@a.io", "SecretA!1", db_path=_TMP_DB)
+        bak_path = tempfile.mktemp(suffix=".pmv")
+        try:
+            self.assertTrue(vault_module.backup_user_vault(uid_a, key_a, bak_path, db_path=_TMP_DB))
+            self.assertFalse(
+                vault_module.restore_user_vault(uid_b, key_b, bak_path, db_path=_TMP_DB),
+                "Backup encrypted with User A's key must fail to restore under User B's key",
+            )
+        finally:
+            if os.path.exists(bak_path):
+                os.remove(bak_path)
+
+    def test_common_password_detection(self):
+        self.assertTrue(password_utils.is_common_password("password"))
+        self.assertTrue(password_utils.is_common_password("123456"))
+        self.assertFalse(password_utils.is_common_password("X9!vQ2#mZ7&kL4@p"))
+
+
+# ---------------------------------------------------------------------------
+# 6. Milestone 4 Phase 2 — Persistent Database Location & Safe Migration Tests
+# ---------------------------------------------------------------------------
+class TestDatabaseLocationAndSafety(unittest.TestCase):
+    """Verifies %LOCALAPPDATA%\\ONESIUM path resolution, safe migration, persistence, and preservation."""
+
+    @staticmethod
+    def _file_sha256(path):
+        import hashlib
+
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+
+    def test_01_default_db_path_uses_localappdata_onesium(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig = os.environ.get("LOCALAPPDATA")
+            os.environ["LOCALAPPDATA"] = tmpdir
+            try:
+                expected = os.path.join(tmpdir, "ONESIUM", "password_manager.db")
+                self.assertEqual(db_module.get_default_db_path(), expected)
+            finally:
+                if orig is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = orig
+
+    def test_02_fresh_database_creation_and_persistence_across_restart(self):
+        import vault as vault_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_db = os.path.join(tmpdir, "AppData", "Local", "ONESIUM", "password_manager.db")
+
+            status1 = db_module.prepare_database(target_path=target_db, legacy_paths=[])
+            self.assertEqual(status1["action"], "initialize_new")
+            db_module.init_db(target_db)
+            self.assertTrue(os.path.isfile(target_db))
+
+            uid = auth.register_user("persist_user", "P3rsist!Pass#9", db_path=target_db)
+            self.assertIsNotNone(uid)
+            _, key = auth.login_user("persist_user", "P3rsist!Pass#9", db_path=target_db)
+            eid = vault_module.add_credential(
+                uid, key, "PersistSite", "p@local", "PersistSecret!1", "Saved note", db_path=target_db
+            )
+
+            # Simulate restart against the existing persistent database
+            status2 = db_module.prepare_database(target_path=target_db, legacy_paths=[])
+            self.assertEqual(status2["action"], "existing_active")
+            db_module.init_db(target_db)
+
+            res2 = auth.login_user("persist_user", "P3rsist!Pass#9", db_path=target_db)
+            self.assertIsNotNone(res2)
+            uid2, key2 = res2
+            self.assertEqual(uid2, uid)
+            self.assertEqual(
+                vault_module.get_credential_password(uid2, eid, key2, db_path=target_db),
+                "PersistSecret!1",
+            )
+
+    def test_03_legacy_database_migrated_safely_without_deleting_source(self):
+        import vault as vault_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legacy_db = os.path.join(tmpdir, "old_folder", "password_manager.db")
+            target_db = os.path.join(tmpdir, "LocalAppData", "ONESIUM", "password_manager.db")
+
+            db_module.init_db(legacy_db)
+            uid1 = auth.register_user("legacy_alice", "Alice!Pass#1", db_path=legacy_db)
+            _, key1 = auth.login_user("legacy_alice", "Alice!Pass#1", db_path=legacy_db)
+            eid1 = vault_module.add_credential(
+                uid1, key1, "LegacyMail", "alice@legacy", "AliceSecret!1", db_path=legacy_db
+            )
+            uid2 = auth.register_user("legacy_bob", "Bob!Pass#2", db_path=legacy_db)
+            legacy_hash_before = self._file_sha256(legacy_db)
+
+            status1 = db_module.prepare_database(target_path=target_db, legacy_paths=[legacy_db])
+            self.assertEqual(status1["action"], "migrated")
+            self.assertEqual(status1["migrated_from"], os.path.abspath(legacy_db))
+            self.assertTrue(os.path.isfile(target_db))
+
+            # Original legacy database must remain intact and unmodified
+            self.assertTrue(os.path.isfile(legacy_db))
+            self.assertEqual(self._file_sha256(legacy_db), legacy_hash_before)
+
+            # Adopted database preserves all accounts, encryption, and secrets
+            login1 = auth.login_user("legacy_alice", "Alice!Pass#1", db_path=target_db)
+            self.assertIsNotNone(login1)
+            self.assertEqual(
+                vault_module.get_credential_password(login1[0], eid1, login1[1], db_path=target_db),
+                "AliceSecret!1",
+            )
+            self.assertIsNotNone(auth.login_user("legacy_bob", "Bob!Pass#2", db_path=target_db))
+
+            # Subsequent startup uses active target without conflict notice or overwrite
+            status2 = db_module.prepare_database(target_path=target_db, legacy_paths=[legacy_db])
+            self.assertEqual(status2["action"], "existing_active")
+
+    def test_04_both_databases_exist_never_overwrites_either(self):
+        import vault as vault_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legacy_db = os.path.join(tmpdir, "legacy", "password_manager.db")
+            target_db = os.path.join(tmpdir, "LocalAppData", "ONESIUM", "password_manager.db")
+
+            db_module.init_db(legacy_db)
+            u_old = auth.register_user("old_only_user", "OldPass!1", db_path=legacy_db)
+            _, k_old = auth.login_user("old_only_user", "OldPass!1", db_path=legacy_db)
+            vault_module.add_credential(u_old, k_old, "OldSite", "old@site", "OldSec!1", db_path=legacy_db)
+
+            db_module.init_db(target_db)
+            u_new = auth.register_user("new_only_user", "NewPass!2", db_path=target_db)
+            _, k_new = auth.login_user("new_only_user", "NewPass!2", db_path=target_db)
+            e_new = vault_module.add_credential(u_new, k_new, "NewSite", "new@site", "NewSec!2", db_path=target_db)
+
+            old_hash_before = self._file_sha256(legacy_db)
+            new_hash_before = self._file_sha256(target_db)
+
+            status = db_module.prepare_database(target_path=target_db, legacy_paths=[legacy_db])
+            self.assertEqual(status["action"], "both_exist_preserved")
+            self.assertEqual(self._file_sha256(legacy_db), old_hash_before)
+            self.assertEqual(self._file_sha256(target_db), new_hash_before)
+
+            # Verify target_db preserves its existing account and does not merge/reset
+            res_new = auth.login_user("new_only_user", "NewPass!2", db_path=target_db)
+            self.assertIsNotNone(res_new)
+            self.assertEqual(
+                vault_module.get_credential_password(res_new[0], e_new, res_new[1], db_path=target_db),
+                "NewSec!2",
+            )
+            self.assertIsNone(auth.login_user("old_only_user", "OldPass!1", db_path=target_db))
+            self.assertIsNotNone(auth.login_user("old_only_user", "OldPass!1", db_path=legacy_db))
+
+    def test_05_empty_or_corrupt_legacy_file_ignored_safely(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bad_db = os.path.join(tmpdir, "bad", "password_manager.db")
+            os.makedirs(os.path.dirname(bad_db), exist_ok=True)
+            with open(bad_db, "wb") as f:
+                f.write(b"not a valid sqlite database")
+            target_db = os.path.join(tmpdir, "LocalAppData", "ONESIUM", "password_manager.db")
+
+            status = db_module.prepare_database(target_path=target_db, legacy_paths=[bad_db])
+            self.assertEqual(status["action"], "initialize_new")
+            self.assertFalse(os.path.exists(target_db))
+
 
 # ---------------------------------------------------------------------------
 # Entry point
