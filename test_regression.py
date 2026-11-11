@@ -966,6 +966,91 @@ class TestDashboardGUI(unittest.TestCase):
         self.assertEqual(self.app.displayed_entries, [])
         self.assertIn("inactivity", self.app.login_status_label.cget("text").lower())
 
+    # 13. Regression: screen transitions with focused CTkButton canvas must not raise TclError in focus()
+    def test_13_screen_transitions_do_not_raise_focus_tclerror(self):
+        import customtkinter as ctk
+
+        if auth.login_user("focus_user", "Focus!Pass13") is None:
+            auth.register_user("focus_user", "Focus!Pass13")
+
+        callback_errors = []
+        orig_handler = self.root.report_callback_exception
+        self.root.report_callback_exception = (
+            lambda exc, val, tb: callback_errors.append(f"{exc.__name__}: {val}")
+        )
+
+        try:
+            self.root.deiconify()
+            self.app.show_login_screen()
+            self._update()
+
+            self.app.login_username_entry.insert(0, "focus_user")
+            self.app.login_password_entry.insert(0, "Focus!Pass13")
+
+            # Locate the primary "Unlock Vault" CTkButton and focus its internal _canvas,
+            # matching CustomTkinter's <Button-1> focus binding when clicked by mouse.
+            buttons = [
+                w for w in self._collect_all_widgets(self.app.container)
+                if isinstance(w, ctk.CTkButton)
+            ]
+            unlock_btn = next(b for b in buttons if b.cget("text") == "Unlock Vault")
+            unlock_btn._canvas.focus_set()
+            self._update()
+            self.assertEqual(self.root.focus_get(), unlock_btn._canvas)
+
+            # 1) Login -> Dashboard (changes resizable False->True while clearing container)
+            unlock_btn._on_enter()
+            unlock_btn._on_release()
+            self.root.after(120, self.root.quit)
+            self.root.mainloop()
+            self.assertIsNotNone(self.app.current_user_id)
+
+            # 2) Dashboard -> Logout -> Login (changes resizable True->False)
+            self.app.search_entry.focus_set()
+            self._update()
+            self.app.btn_logout.invoke()
+            self.root.after(120, self.root.quit)
+            self.root.mainloop()
+            self.assertIsNone(self.app.current_user_id)
+
+            # 3) Login -> Register with focused "Create Account" button canvas
+            buttons = [
+                w for w in self._collect_all_widgets(self.app.container)
+                if isinstance(w, ctk.CTkButton)
+            ]
+            create_btn = next(b for b in buttons if b.cget("text") == "Create Account")
+            create_btn._canvas.focus_set()
+            self._update()
+            create_btn._on_enter()
+            create_btn._on_release()
+            self.root.after(120, self.root.quit)
+            self.root.mainloop()
+            self.assertTrue(hasattr(self.app, "reg_username_entry"))
+
+            # 4) Register -> Back to Login with focused "Back to Login" button canvas
+            buttons = [
+                w for w in self._collect_all_widgets(self.app.container)
+                if isinstance(w, ctk.CTkButton)
+            ]
+            back_btn = next(b for b in buttons if b.cget("text") == "Back to Login")
+            back_btn._canvas.focus_set()
+            self._update()
+            back_btn._on_enter()
+            back_btn._on_release()
+            self.root.after(120, self.root.quit)
+            self.root.mainloop()
+            self.assertTrue(hasattr(self.app, "login_username_entry"))
+
+            self.assertEqual(
+                callback_errors,
+                [],
+                f"Tkinter callback raised unexpected errors: {callback_errors}",
+            )
+        finally:
+            self.root.report_callback_exception = orig_handler
+            self.root.withdraw()
+            self._update()
+
 
 # ---------------------------------------------------------------------------
 # Entry point

@@ -372,6 +372,7 @@ class PasswordManagerApp:
         self.root.geometry("460x560")
         self.root.minsize(420, 480)
         self.root.resizable(False, False)
+        self._window_resizable = (False, False)
 
         apply_vault_theme(self.root)
         self._icon_font = _resolve_icon_font()
@@ -438,12 +439,28 @@ class PasswordManagerApp:
             pass
 
     def clear_container(self):
-        """Removes all child widgets from the container."""
+        """Moves focus off about-to-be-destroyed child widgets and clears the container."""
+        try:
+            focused = self.root.focus_get()
+            if focused is not None and focused is not self.root:
+                self.root.focus_set()
+        except (tk.TclError, KeyError):
+            try:
+                self.root.focus_set()
+            except tk.TclError:
+                pass
         self.row_widgets = {}
         self._list_canvas = None
         self._list_canvas_window = None
         for widget in self.container.winfo_children():
             widget.destroy()
+
+    def _set_window_resizable(self, width, height):
+        """Updates root resizable state only when changed to avoid CTk focus/withdraw churn."""
+        target = (bool(width), bool(height))
+        if self._window_resizable != target:
+            self.root.resizable(*target)
+            self._window_resizable = target
 
     def _toggle_show(self, entry, btn):
         """Toggles password masking for plain tk/ttk Entry widgets (dashboard dialogs)."""
@@ -459,10 +476,10 @@ class PasswordManagerApp:
     # ----------------------------------------------------------------------
     def show_login_screen(self, initial_message="", is_success=False):
         was_wide = self.root.winfo_width() > 550
+        self.clear_container()
         self.root.minsize(420, 500)
         self.root.geometry("460x560")
-        self.root.resizable(False, False)
-        self.clear_container()
+        self._set_window_resizable(False, False)
         if was_wide:
             center_window(self.root, 460, 560)
 
@@ -676,10 +693,10 @@ class PasswordManagerApp:
     # 2. Registration Screen  (CustomTkinter)
     # ----------------------------------------------------------------------
     def show_register_screen(self):
-        self.root.geometry("460x630")
-        self.root.minsize(420, 580)
-        self.root.resizable(False, False)
         self.clear_container()
+        self.root.minsize(420, 580)
+        self.root.geometry("460x630")
+        self._set_window_resizable(False, False)
 
         # Outer padding wrapper
         outer = ctk.CTkFrame(self.container, fg_color=COLOR_BG, corner_radius=0)
@@ -956,10 +973,10 @@ class PasswordManagerApp:
     # 3. Vault Dashboard Screen  (CustomTkinter)
     # ----------------------------------------------------------------------
     def show_dashboard_screen(self):
+        self.clear_container()
         self.root.minsize(800, 520)
         self.root.geometry("980x620")
-        self.root.resizable(True, True)
-        self.clear_container()
+        self._set_window_resizable(True, True)
         center_window(self.root, 980, 620)
 
         self.selected_entry_id = None
