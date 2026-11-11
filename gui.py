@@ -1,6 +1,7 @@
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, font as tkfont
+from datetime import datetime
 import auth
 import vault
 import password_utils
@@ -206,6 +207,159 @@ def center_window(window, width, height, parent=None):
     window.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
 
 
+# ---------------------------------------------------------------------------
+# Icon & Formatting Helpers (zero external dependencies)
+# ---------------------------------------------------------------------------
+_FLUENT_ICONS = {
+    "shield": "\uEA18",
+    "shield_check": "\uE83D",
+    "vault": "\uE72E",
+    "key": "\uE8D7",
+    "upload": "\uE898",
+    "download": "\uE896",
+    "logout": "\uF3B1",
+    "search": "\uE721",
+    "clear": "\uE711",
+    "add": "\uE710",
+    "globe": "\uE774",
+    "chevron": "\uE76C",
+    "user": "\uE77B",
+}
+
+_UNICODE_FALLBACK_ICONS = {
+    "shield": "\U0001f6e1",
+    "shield_check": "\U0001f6e1",
+    "vault": "\U0001f512",
+    "key": "\U0001f511",
+    "upload": "\u2191",
+    "download": "\u2193",
+    "logout": "\u21AA",
+    "search": "\U0001f50d",
+    "clear": "\u2715",
+    "add": "+",
+    "globe": "\U0001f310",
+    "chevron": "\u203A",
+    "user": "\U0001f464",
+}
+
+
+def _resolve_icon_font():
+    """Returns crisp Windows vector icon font if available, else None."""
+    try:
+        families = set(tkfont.families())
+        if "Segoe Fluent Icons" in families:
+            return "Segoe Fluent Icons"
+        if "Segoe MDL2 Assets" in families:
+            return "Segoe MDL2 Assets"
+    except Exception:
+        pass
+    return None
+
+
+def _format_updated_date(timestamp_str):
+    """Formats an ISO/SQLite timestamp cleanly for subtle row display."""
+    if not timestamp_str:
+        return ""
+    raw = str(timestamp_str).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(raw[:19], fmt)
+            return dt.strftime("%b %d, %Y")
+        except ValueError:
+            continue
+    return raw[:16]
+
+
+def _truncate_text(text, max_len):
+    """Truncates overly long display strings cleanly without altering underlying data."""
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1].rstrip() + "\u2026"
+
+
+class _ToolTip:
+    """Lightweight dark-themed hover tooltip that cleans up safely on destroy."""
+
+    def __init__(self, widget, text, delay_ms=350):
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self._after_id = None
+        self._tip_window = None
+
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+        widget.bind("<Destroy>", self._hide, add="+")
+
+    def _schedule(self, event=None):
+        self._cancel()
+        if not self.text:
+            return
+        try:
+            self._after_id = self.widget.after(self.delay_ms, self._show)
+        except tk.TclError:
+            pass
+
+    def _cancel(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        self._after_id = None
+        try:
+            if not self.widget.winfo_exists():
+                return
+            x = self.widget.winfo_rootx() + 10
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        except tk.TclError:
+            return
+
+        self._hide()
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.attributes("-topmost", True)
+        tip.configure(bg=COLOR_BORDER)
+
+        inner = tk.Label(
+            tip,
+            text=self.text,
+            bg=COLOR_SURFACE_ELEVATED,
+            fg=COLOR_TEXT_PRIMARY,
+            font=(FONT_FAMILY, 9),
+            padx=8,
+            pady=4,
+        )
+        inner.pack(padx=1, pady=1)
+
+        tip.update_idletasks()
+        screen_w = tip.winfo_screenwidth()
+        screen_h = tip.winfo_screenheight()
+        tw = tip.winfo_reqwidth()
+        th = tip.winfo_reqheight()
+        if x + tw > screen_w - 8:
+            x = max(8, screen_w - tw - 8)
+        if y + th > screen_h - 8:
+            y = max(8, self.widget.winfo_rooty() - th - 6)
+        tip.wm_geometry(f"+{x}+{y}")
+        self._tip_window = tip
+
+    def _hide(self, event=None):
+        self._cancel()
+        if self._tip_window is not None:
+            try:
+                self._tip_window.destroy()
+            except tk.TclError:
+                pass
+            self._tip_window = None
+
+
 class PasswordManagerApp:
     """
     GUI Presentation Layer for ONESIUM — The Credential Vault.
@@ -220,6 +374,7 @@ class PasswordManagerApp:
         self.root.resizable(False, False)
 
         apply_vault_theme(self.root)
+        self._icon_font = _resolve_icon_font()
 
         # In-memory session state (cleared on logout / auto-lock)
         self.current_user_id = None
@@ -229,9 +384,18 @@ class PasswordManagerApp:
         self.active_dialog = None
         self.auto_lock_job = None
 
-        # Bind user activity to reset auto-lock timer
+        # Dashboard view state (never stores plaintext passwords)
+        self.row_widgets = {}
+        self.displayed_entries = []
+        self._total_credential_count = 0
+        self._last_search_query = ""
+        self._list_canvas = None
+        self._list_canvas_window = None
+
+        # Bind user activity to reset auto-lock timer & single global wheel handler
         self.root.bind_all("<Key>", self.reset_auto_lock_timer)
         self.root.bind_all("<Button>", self.reset_auto_lock_timer)
+        self.root.bind_all("<MouseWheel>", self._on_dashboard_mousewheel)
 
         # Container frame for switching views (CTkFrame replaces ttk.Frame)
         self.container = ctk.CTkFrame(self.root, corner_radius=0, fg_color=COLOR_BG)
@@ -242,8 +406,42 @@ class PasswordManagerApp:
 
         self.show_login_screen()
 
+    def _icon_glyph(self, name):
+        """Returns icon glyph matching the resolved icon font."""
+        table = _FLUENT_ICONS if self._icon_font else _UNICODE_FALLBACK_ICONS
+        return table.get(name, "")
+
+    def _icon_font_tuple(self, size=14):
+        """Returns font tuple for rendering icons cleanly."""
+        return (self._icon_font or FONT_FAMILY, size)
+
+    def _on_dashboard_mousewheel(self, event):
+        """Routes mouse-wheel scrolling solely to the active credential list viewport."""
+        if self.current_user_id is None:
+            return
+        canvas = self._list_canvas
+        if canvas is None:
+            return
+        try:
+            if not canvas.winfo_exists() or not canvas.winfo_ismapped():
+                return
+            cx = canvas.winfo_rootx()
+            cy = canvas.winfo_rooty()
+            cw = canvas.winfo_width()
+            ch = canvas.winfo_height()
+            if not (cx <= event.x_root <= cx + cw and cy <= event.y_root <= cy + ch):
+                return
+            if canvas.yview() != (0.0, 1.0):
+                step = -1 if event.delta > 0 else 1
+                canvas.yview_scroll(step * 2, "units")
+        except tk.TclError:
+            pass
+
     def clear_container(self):
         """Removes all child widgets from the container."""
+        self.row_widgets = {}
+        self._list_canvas = None
+        self._list_canvas_window = None
         for widget in self.container.winfo_children():
             widget.destroy()
 
@@ -260,10 +458,13 @@ class PasswordManagerApp:
     # 1. Login Screen  (CustomTkinter)
     # ----------------------------------------------------------------------
     def show_login_screen(self, initial_message="", is_success=False):
-        self.root.geometry("460x560")
+        was_wide = self.root.winfo_width() > 550
         self.root.minsize(420, 500)
+        self.root.geometry("460x560")
         self.root.resizable(False, False)
         self.clear_container()
+        if was_wide:
+            center_window(self.root, 460, 560)
 
         # Outer padding wrapper
         outer = ctk.CTkFrame(self.container, fg_color=COLOR_BG, corner_radius=0)
@@ -752,369 +953,834 @@ class PasswordManagerApp:
         )
 
     # ----------------------------------------------------------------------
-    # 3. Vault Dashboard Screen
+    # 3. Vault Dashboard Screen  (CustomTkinter)
     # ----------------------------------------------------------------------
     def show_dashboard_screen(self):
-        self.root.geometry("880x540")
+        self.root.minsize(800, 520)
+        self.root.geometry("980x620")
         self.root.resizable(True, True)
         self.clear_container()
+        center_window(self.root, 980, 620)
 
-        # ---------------- Top Navigation Bar ----------------
-        top_bar = tk.Frame(
-            self.container,
-            bg=COLOR_SURFACE,
-            height=48,
-            bd=1,
-            relief="solid",
-            highlightbackground=COLOR_BORDER,
-            highlightthickness=1,
-        )
-        top_bar.pack(fill="x", side="top")
-        top_bar.pack_propagate(False)
+        self.selected_entry_id = None
+        self._last_search_query = ""
+        self._total_credential_count = 0
 
-        # Brand on Left
-        brand_box = tk.Frame(top_bar, bg=COLOR_SURFACE)
-        brand_box.pack(side="left", padx=16, pady=6)
-
-        logo_title = tk.Label(
-            brand_box,
-            text="\U0001f6e1  ONESIUM",
-            font=(FONT_FAMILY, 11, "bold"),
-            bg=COLOR_SURFACE,
-            fg=COLOR_TEXT_PRIMARY,
-        )
-        logo_title.pack(side="left", padx=(0, 6))
-
-        sub_title = tk.Label(
-            brand_box,
-            text="|  The Credential Vault",
-            font=(FONT_FAMILY, 9),
-            bg=COLOR_SURFACE,
-            fg=COLOR_TEXT_MUTED,
-        )
-        sub_title.pack(side="left")
-
-        # Session & Logout on Right
-        right_box = tk.Frame(top_bar, bg=COLOR_SURFACE)
-        right_box.pack(side="right", padx=16, pady=6)
-
-        user_badge = tk.Label(
-            right_box,
-            text=f"User: {self.current_username}",
-            font=(FONT_FAMILY, 9, "bold"),
-            bg=COLOR_SURFACE_ELEVATED,
-            fg=COLOR_TEXT_PRIMARY,
-            padx=8,
-            pady=3,
-            bd=1,
-            relief="solid",
-            highlightbackground=COLOR_BORDER,
-            highlightthickness=1,
-        )
-        user_badge.pack(side="left", padx=(0, 10))
-
-        logout_btn = ttk.Button(
-            right_box,
-            text="Lock & Logout",
-            command=self.handle_logout,
-        )
-        logout_btn.pack(side="left")
-
-        # ---------------- Main Body Layout ----------------
-        body_frame = tk.Frame(self.container, bg=COLOR_BG)
+        # Root layout: Sidebar (left) + 1px divider + Main Content Area (right)
+        body_frame = ctk.CTkFrame(self.container, fg_color=COLOR_BG, corner_radius=0)
         body_frame.pack(fill="both", expand=True)
 
-        # Left Sidebar
-        sidebar = tk.Frame(
-            body_frame,
-            bg=COLOR_SURFACE,
-            width=180,
-            bd=1,
-            relief="solid",
-            highlightbackground=COLOR_BORDER,
-            highlightthickness=1,
+        self._build_dashboard_sidebar(body_frame)
+
+        divider = ctk.CTkFrame(body_frame, width=1, fg_color=COLOR_BORDER, corner_radius=0)
+        divider.pack(side="left", fill="y")
+
+        self._build_dashboard_main(body_frame)
+
+        # Initial data load (metadata only, never decrypts passwords)
+        self.refresh_credential_list()
+
+    def _make_sidebar_item(self, parent, icon_name, label_text, command, active=False, tooltip_text=""):
+        """Creates a compact rounded sidebar navigation button with aligned icon and hover state."""
+        base_fg = COLOR_SURFACE_ELEVATED if active else "transparent"
+        hover_fg = COLOR_SURFACE_ELEVATED
+        text_fg = COLOR_TEXT_PRIMARY if active else COLOR_TEXT_SECONDARY
+        icon_fg = COLOR_PRIMARY if active else COLOR_TEXT_MUTED
+
+        row = ctk.CTkFrame(
+            parent,
+            height=36,
+            corner_radius=8,
+            fg_color=base_fg,
+            border_width=1 if active else 0,
+            border_color=COLOR_BORDER if active else COLOR_SURFACE,
+            cursor="hand2",
         )
+        row.pack(fill="x", pady=(0, 4))
+        row.pack_propagate(False)
+
+        if active:
+            accent = ctk.CTkFrame(row, width=3, height=18, corner_radius=2, fg_color=COLOR_PRIMARY)
+            accent.pack(side="left", padx=(4, 6), pady=9)
+        else:
+            spacer = ctk.CTkFrame(row, width=3, height=18, fg_color="transparent")
+            spacer.pack(side="left", padx=(4, 6))
+
+        icon_lbl = ctk.CTkLabel(
+            row,
+            text=self._icon_glyph(icon_name),
+            font=self._icon_font_tuple(13),
+            text_color=icon_fg,
+            fg_color="transparent",
+            width=20,
+        )
+        icon_lbl.pack(side="left", padx=(0, 8))
+
+        text_lbl = ctk.CTkLabel(
+            row,
+            text=label_text,
+            font=(FONT_FAMILY, 11, "bold" if active else "normal"),
+            text_color=text_fg,
+            fg_color="transparent",
+            anchor="w",
+        )
+        text_lbl.pack(side="left", fill="x", expand=True)
+
+        def on_enter(_event=None):
+            if not active:
+                row.configure(fg_color=hover_fg)
+                text_lbl.configure(text_color=COLOR_TEXT_PRIMARY)
+                icon_lbl.configure(text_color=COLOR_TEXT_PRIMARY)
+
+        def on_leave(_event=None):
+            if active:
+                return
+            try:
+                px, py = row.winfo_pointerxy()
+                rx, ry = row.winfo_rootx(), row.winfo_rooty()
+                if rx <= px <= rx + row.winfo_width() and ry <= py <= ry + row.winfo_height():
+                    return
+            except tk.TclError:
+                return
+            row.configure(fg_color=base_fg)
+            text_lbl.configure(text_color=text_fg)
+            icon_lbl.configure(text_color=icon_fg)
+
+        def on_click(_event=None):
+            if callable(command):
+                command()
+
+        for widget in row.winfo_children() + [row]:
+            widget.configure(cursor="hand2")
+            widget.bind("<Enter>", on_enter, add="+")
+            widget.bind("<Leave>", on_leave, add="+")
+            widget.bind("<Button-1>", on_click, add="+")
+
+        if tooltip_text:
+            _ToolTip(row, tooltip_text)
+
+        row.invoke = command
+        return row
+
+    def _build_dashboard_sidebar(self, parent):
+        """Builds the secondary left navigation sidebar."""
+        sidebar = ctk.CTkFrame(parent, width=228, fg_color=COLOR_SURFACE, corner_radius=0)
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
 
-        side_content = tk.Frame(sidebar, bg=COLOR_SURFACE, padx=10, pady=14)
-        side_content.pack(fill="both", expand=True)
+        inner = ctk.CTkFrame(sidebar, fg_color="transparent", corner_radius=0)
+        inner.pack(fill="both", expand=True, padx=14, pady=18)
 
-        tk.Label(side_content, text="NAVIGATION", font=(FONT_FAMILY, 8, "bold"), bg=COLOR_SURFACE, fg=COLOR_TEXT_DIM).pack(anchor="w", pady=(0, 6))
+        # ---- Branding ----
+        brand_row = ctk.CTkFrame(inner, fg_color="transparent", corner_radius=0)
+        brand_row.pack(fill="x", pady=(0, 10))
 
-        vault_tab_btn = ttk.Button(
-            side_content,
-            text="Your Vault",
-            style="SidebarActive.TButton",
+        logo_badge = ctk.CTkFrame(
+            brand_row,
+            width=32,
+            height=32,
+            corner_radius=8,
+            fg_color=COLOR_SURFACE_ELEVATED,
+            border_width=1,
+            border_color=COLOR_BORDER,
         )
-        vault_tab_btn.pack(fill="x", pady=(0, 4))
+        logo_badge.pack(side="left", padx=(0, 10))
+        logo_badge.pack_propagate(False)
 
-        gen_tab_btn = ttk.Button(
-            side_content,
-            text="Password Generator",
-            style="Sidebar.TButton",
-            command=self.open_generator_dialog,
+        ctk.CTkLabel(
+            logo_badge,
+            text=self._icon_glyph("shield"),
+            font=self._icon_font_tuple(14),
+            text_color=COLOR_PRIMARY,
+            fg_color="transparent",
+        ).pack(expand=True)
+
+        brand_text = ctk.CTkFrame(brand_row, fg_color="transparent", corner_radius=0)
+        brand_text.pack(side="left", fill="x", expand=True)
+
+        ctk.CTkLabel(
+            brand_text,
+            text="ONESIUM",
+            font=(FONT_FAMILY, 14, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+            anchor="w",
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            brand_text,
+            text="The Credential Vault",
+            font=(FONT_FAMILY, 9),
+            text_color=COLOR_TEXT_MUTED,
+            anchor="w",
+        ).pack(anchor="w")
+
+        # ---- Offline / Private / Local Status Pill ----
+        status_pill = ctk.CTkFrame(
+            inner,
+            height=28,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_width=1,
+            border_color=COLOR_BORDER,
         )
-        gen_tab_btn.pack(fill="x", pady=(0, 4))
+        status_pill.pack(fill="x", pady=(2, 18))
+        status_pill.pack_propagate(False)
 
-        tk.Label(side_content, text="VAULT TOOLS", font=(FONT_FAMILY, 8, "bold"), bg=COLOR_SURFACE, fg=COLOR_TEXT_DIM).pack(anchor="w", pady=(14, 6))
-
-        side_backup_btn = ttk.Button(
-            side_content,
-            text="Backup Vault",
-            style="Sidebar.TButton",
-            command=self.handle_backup,
-        )
-        side_backup_btn.pack(fill="x", pady=(0, 4))
-
-        side_restore_btn = ttk.Button(
-            side_content,
-            text="Restore Vault",
-            style="Sidebar.TButton",
-            command=self.handle_restore,
-        )
-        side_restore_btn.pack(fill="x", pady=(0, 4))
-
-        # Bottom status in sidebar
-        side_status = tk.Label(
-            side_content,
-            text="● Offline Safe\nEncrypted Local DB",
-            font=(FONT_FAMILY, 8),
-            bg=COLOR_SURFACE,
-            fg=COLOR_SUCCESS,
-            justify="left",
-        )
-        side_status.pack(side="bottom", anchor="w", pady=(8, 0))
-
-        # Main Content Area
-        main_area = tk.Frame(body_frame, bg=COLOR_BG, padx=18, pady=14)
-        main_area.pack(side="left", fill="both", expand=True)
-
-        # Title and Subtitle Row
-        title_row = tk.Frame(main_area, bg=COLOR_BG)
-        title_row.pack(fill="x", pady=(0, 10))
-
-        left_title = tk.Frame(title_row, bg=COLOR_BG)
-        left_title.pack(side="left")
-
-        tk.Label(left_title, text="Your Vault", font=(FONT_FAMILY, 15, "bold"), bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY).pack(anchor="w")
-        tk.Label(left_title, text="Your credentials stay on this device.", font=(FONT_FAMILY, 9), bg=COLOR_BG, fg=COLOR_TEXT_MUTED).pack(anchor="w")
-
-        self.count_badge = tk.Label(
-            title_row,
-            text="0 Saved",
+        ctk.CTkLabel(
+            status_pill,
+            text="\u25cf  Offline \u2022 Private \u2022 Local",
             font=(FONT_FAMILY, 9, "bold"),
-            bg=COLOR_SURFACE_ELEVATED,
-            fg=COLOR_TEXT_PRIMARY,
-            padx=8,
-            pady=3,
-            bd=1,
-            relief="solid",
-            highlightbackground=COLOR_BORDER,
-            highlightthickness=1,
+            text_color=COLOR_SUCCESS,
+            fg_color=COLOR_INPUT,
+            anchor="w",
+        ).pack(side="left", padx=10, pady=2)
+        _ToolTip(status_pill, "All credentials stay encrypted locally on this device.")
+
+        # ---- Navigation Section ----
+        ctk.CTkLabel(
+            inner,
+            text="NAVIGATION",
+            font=(FONT_FAMILY, 9, "bold"),
+            text_color=COLOR_TEXT_MUTED,
+            anchor="w",
+        ).pack(anchor="w", padx=6, pady=(0, 6))
+
+        self.nav_vault_btn = self._make_sidebar_item(
+            inner,
+            icon_name="vault",
+            label_text="Your Vault",
+            command=self.clear_search,
+            active=True,
+            tooltip_text="View all saved credentials",
         )
-        self.count_badge.pack(side="right", pady=(2, 0))
 
-        # Search Bar & Add Button Row
-        toolbar = tk.Frame(main_area, bg=COLOR_BG)
-        toolbar.pack(fill="x", pady=(0, 10))
+        self.nav_generator_btn = self._make_sidebar_item(
+            inner,
+            icon_name="key",
+            label_text="Password Generator",
+            command=self.open_generator_dialog,
+            active=False,
+            tooltip_text="Generate a strong random password",
+        )
 
-        tk.Label(toolbar, text="Search:", font=(FONT_FAMILY, 9), bg=COLOR_BG, fg=COLOR_TEXT_MUTED).pack(side="left", padx=(0, 4))
+        # ---- Vault Tools Section ----
+        ctk.CTkLabel(
+            inner,
+            text="VAULT TOOLS",
+            font=(FONT_FAMILY, 9, "bold"),
+            text_color=COLOR_TEXT_MUTED,
+            anchor="w",
+        ).pack(anchor="w", padx=6, pady=(14, 6))
 
-        self.search_entry = ttk.Entry(toolbar)
-        self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        self.search_entry.bind("<KeyRelease>", lambda e: self.handle_search())
+        self.nav_backup_btn = self._make_sidebar_item(
+            inner,
+            icon_name="upload",
+            label_text="Backup Vault",
+            command=self.handle_backup,
+            active=False,
+            tooltip_text="Export an encrypted backup (.pmv)",
+        )
 
-        clear_search_btn = ttk.Button(
+        self.nav_restore_btn = self._make_sidebar_item(
+            inner,
+            icon_name="download",
+            label_text="Restore Vault",
+            command=self.handle_restore,
+            active=False,
+            tooltip_text="Restore credentials from an encrypted backup",
+        )
+
+        # ---- Bottom User Session & Lock / Logout ----
+        bottom_box = ctk.CTkFrame(inner, fg_color="transparent", corner_radius=0)
+        bottom_box.pack(side="bottom", fill="x")
+
+        ctk.CTkFrame(bottom_box, height=1, fg_color=COLOR_BORDER, corner_radius=0).pack(
+            fill="x", pady=(0, 12)
+        )
+
+        user_card = ctk.CTkFrame(
+            bottom_box,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_width=1,
+            border_color=COLOR_BORDER,
+        )
+        user_card.pack(fill="x", pady=(0, 8))
+
+        user_inner = ctk.CTkFrame(user_card, fg_color="transparent", corner_radius=0)
+        user_inner.pack(fill="x", padx=10, pady=8)
+
+        avatar = ctk.CTkFrame(
+            user_inner,
+            width=28,
+            height=28,
+            corner_radius=14,
+            fg_color=COLOR_SURFACE_ELEVATED,
+            border_width=1,
+            border_color=COLOR_BORDER,
+        )
+        avatar.pack(side="left", padx=(0, 8))
+        avatar.pack_propagate(False)
+
+        ctk.CTkLabel(
+            avatar,
+            text=self._icon_glyph("user"),
+            font=self._icon_font_tuple(12),
+            text_color=COLOR_TEXT_SECONDARY,
+            fg_color="transparent",
+        ).pack(expand=True)
+
+        user_meta = ctk.CTkFrame(user_inner, fg_color="transparent", corner_radius=0)
+        user_meta.pack(side="left", fill="x", expand=True)
+
+        self.sidebar_user_label = ctk.CTkLabel(
+            user_meta,
+            text=_truncate_text(self.current_username or "User", 16),
+            font=(FONT_FAMILY, 10, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+            anchor="w",
+        )
+        self.sidebar_user_label.pack(anchor="w")
+
+        ctk.CTkLabel(
+            user_meta,
+            text="Local session",
+            font=(FONT_FAMILY, 9),
+            text_color=COLOR_TEXT_MUTED,
+            anchor="w",
+        ).pack(anchor="w")
+
+        self.btn_logout = self._make_sidebar_item(
+            bottom_box,
+            icon_name="logout",
+            label_text="Lock & Logout",
+            command=self.handle_logout,
+            active=False,
+            tooltip_text="Lock vault, clear clipboard, and return to login",
+        )
+        self.btn_logout.configure(
+            fg_color=COLOR_SURFACE_ELEVATED,
+            border_width=1,
+            border_color=COLOR_BORDER,
+        )
+
+    def _build_dashboard_main(self, parent):
+        """Builds the main vault header, search toolbar, credential list, and empty state."""
+        main_area = ctk.CTkFrame(parent, fg_color=COLOR_BG, corner_radius=0)
+        main_area.pack(side="left", fill="both", expand=True, padx=24, pady=20)
+
+        # ---- Top Header Row ----
+        header_row = ctk.CTkFrame(main_area, fg_color="transparent", corner_radius=0)
+        header_row.pack(fill="x", pady=(0, 14))
+
+        title_col = ctk.CTkFrame(header_row, fg_color="transparent", corner_radius=0)
+        title_col.pack(side="left", fill="x", expand=True)
+
+        ctk.CTkLabel(
+            title_col,
+            text="Your Vault",
+            font=(FONT_FAMILY, 20, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+            anchor="w",
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            title_col,
+            text="Your credentials, securely stored on this device.",
+            font=(FONT_FAMILY, 11),
+            text_color=COLOR_TEXT_SECONDARY,
+            anchor="w",
+        ).pack(anchor="w", pady=(2, 0))
+
+        count_pill = ctk.CTkFrame(
+            header_row,
+            height=30,
+            corner_radius=8,
+            fg_color=COLOR_SURFACE,
+            border_width=1,
+            border_color=COLOR_BORDER,
+        )
+        count_pill.pack(side="right", anchor="n", pady=(4, 0))
+
+        self.count_badge = ctk.CTkLabel(
+            count_pill,
+            text="0 Saved",
+            font=(FONT_FAMILY, 10, "bold"),
+            text_color=COLOR_TEXT_SECONDARY,
+            fg_color=COLOR_SURFACE,
+            padx=10,
+            pady=3,
+        )
+        self.count_badge.pack(padx=2, pady=2)
+
+        # ---- Search Bar & Primary Add Action Row ----
+        toolbar = ctk.CTkFrame(main_area, fg_color="transparent", corner_radius=0)
+        toolbar.pack(fill="x", pady=(0, 14))
+
+        search_box = ctk.CTkFrame(
             toolbar,
-            text="Clear",
+            height=40,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_width=1,
+            border_color=COLOR_BORDER,
+        )
+        search_box.pack(side="left", fill="x", expand=True, padx=(0, 12))
+        search_box.pack_propagate(False)
+
+        search_icon = ctk.CTkLabel(
+            search_box,
+            text=self._icon_glyph("search"),
+            font=self._icon_font_tuple(13),
+            text_color=COLOR_TEXT_MUTED,
+            fg_color=COLOR_INPUT,
+            width=26,
+        )
+        search_icon.pack(side="left", padx=(10, 4), pady=4)
+
+        self.search_entry = ctk.CTkEntry(
+            search_box,
+            height=32,
+            border_width=0,
+            corner_radius=0,
+            fg_color=COLOR_INPUT,
+            text_color=COLOR_TEXT_PRIMARY,
+            placeholder_text="Search by site or username...",
+            placeholder_text_color=COLOR_TEXT_MUTED,
+            font=(FONT_FAMILY, 11),
+        )
+        self.search_entry.pack(side="left", fill="both", expand=True, pady=3)
+        self.search_entry.bind("<KeyRelease>", self.handle_search)
+        self.search_entry.bind("<Escape>", lambda e: self.clear_search())
+
+        self.clear_search_btn = ctk.CTkButton(
+            search_box,
+            text=self._icon_glyph("clear"),
+            font=self._icon_font_tuple(11),
+            width=28,
+            height=28,
+            corner_radius=6,
+            fg_color=COLOR_INPUT,
+            hover_color=COLOR_SURFACE_ELEVATED,
+            text_color=COLOR_TEXT_MUTED,
             command=self.clear_search,
         )
-        clear_search_btn.pack(side="left", padx=(0, 8))
+        self.clear_search_btn.pack(side="right", padx=(4, 6), pady=4)
+        _ToolTip(self.clear_search_btn, "Clear search")
 
-        self.btn_add = ttk.Button(
+        self.btn_add = ctk.CTkButton(
             toolbar,
-            text="+ Add Credential",
-            style="Primary.TButton",
+            text="+  Add Credential",
+            height=40,
+            width=156,
+            corner_radius=8,
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_PRIMARY_HOVER,
+            text_color="#FFFFFF",
+            font=(FONT_FAMILY, 11, "bold"),
             command=self.open_add_dialog,
         )
         self.btn_add.pack(side="right")
+        _ToolTip(self.btn_add, "Add a new credential to your vault")
 
-        # Treeview Credential Table Container
-        tree_container = tk.Frame(
-            main_area,
-            bg=COLOR_SURFACE,
-            bd=1,
-            relief="solid",
-            highlightbackground=COLOR_BORDER,
-            highlightthickness=1,
+        # ---- List / Empty State Host ----
+        self.list_host = ctk.CTkFrame(main_area, fg_color=COLOR_BG, corner_radius=0)
+        self.list_host.pack(fill="both", expand=True)
+
+        # Scrollable Credential List Viewport (Canvas + CTkScrollbar + CTkFrame)
+        self.list_viewport_frame = ctk.CTkFrame(self.list_host, fg_color=COLOR_BG, corner_radius=0)
+
+        self._list_canvas = tk.Canvas(
+            self.list_viewport_frame,
+            bg=COLOR_BG,
+            highlightthickness=0,
+            bd=0,
+            yscrollincrement=20,
         )
-        tree_container.pack(fill="both", expand=True, pady=(0, 10))
+        self._list_scrollbar = ctk.CTkScrollbar(
+            self.list_viewport_frame,
+            orientation="vertical",
+            command=self._list_canvas.yview,
+            fg_color=COLOR_BG,
+            button_color=COLOR_SURFACE_ELEVATED,
+            button_hover_color=COLOR_BORDER,
+        )
+        self._list_canvas.configure(yscrollcommand=self._list_scrollbar.set)
 
-        columns = ("site_name", "username_field", "updated_at")
-        self.tree = ttk.Treeview(
-            tree_container,
-            columns=columns,
-            show="headings",
-            selectmode="browse",
+        self._list_scrollbar.pack(side="right", fill="y", padx=(6, 0))
+        self._list_canvas.pack(side="left", fill="both", expand=True)
+
+        self.credential_rows_frame = ctk.CTkFrame(self._list_canvas, fg_color=COLOR_BG, corner_radius=0)
+        self._list_canvas_window = self._list_canvas.create_window(
+            (0, 0),
+            window=self.credential_rows_frame,
+            anchor="nw",
         )
 
-        self.tree.heading("site_name", text="Site / Application")
-        self.tree.heading("username_field", text="Username / Identifier")
-        self.tree.heading("updated_at", text="Last Updated")
+        def _sync_scrollregion(_event=None):
+            if self._list_canvas and self._list_canvas.winfo_exists():
+                bbox = self._list_canvas.bbox("all")
+                if bbox:
+                    self._list_canvas.configure(scrollregion=bbox)
+                else:
+                    self._list_canvas.configure(scrollregion=(0, 0, 0, 0))
+                self._update_scrollbar_visibility()
 
-        self.tree.column("site_name", width=220, anchor="w")
-        self.tree.column("username_field", width=220, anchor="w")
-        self.tree.column("updated_at", width=180, anchor="w")
+        def _fit_rows_width(event):
+            if self._list_canvas and self._list_canvas.winfo_exists() and self._list_canvas_window is not None:
+                self._list_canvas.itemconfigure(self._list_canvas_window, width=event.width)
+                self._update_scrollbar_visibility()
 
-        scrollbar = ttk.Scrollbar(
-            tree_container,
-            orient="vertical",
-            command=self.tree.yview,
-            style="Vertical.TScrollbar",
+        self.credential_rows_frame.bind("<Configure>", _sync_scrollregion)
+        self._list_canvas.bind("<Configure>", _fit_rows_width)
+
+        # ---- Designed Empty State ----
+        self.empty_state_frame = ctk.CTkFrame(self.list_host, fg_color=COLOR_BG, corner_radius=0)
+
+        empty_card = ctk.CTkFrame(
+            self.empty_state_frame,
+            width=400,
+            corner_radius=14,
+            fg_color=COLOR_SURFACE,
+            border_width=1,
+            border_color=COLOR_BORDER,
         )
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        empty_card.place(relx=0.5, rely=0.46, anchor="center")
 
-        self.tree.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        empty_inner = ctk.CTkFrame(empty_card, fg_color="transparent", corner_radius=0)
+        empty_inner.pack(padx=34, pady=30)
 
-        # Empty state overlay inside tree container
-        self.empty_frame = tk.Frame(tree_container, bg=COLOR_SURFACE)
-        tk.Label(
-            self.empty_frame,
-            text="No credentials yet",
+        empty_icon_badge = ctk.CTkFrame(
+            empty_inner,
+            width=54,
+            height=54,
+            corner_radius=14,
+            fg_color=COLOR_SURFACE_ELEVATED,
+            border_width=1,
+            border_color=COLOR_BORDER,
+        )
+        empty_icon_badge.pack(pady=(0, 14))
+        empty_icon_badge.pack_propagate(False)
+
+        self.empty_icon_label = ctk.CTkLabel(
+            empty_icon_badge,
+            text=self._icon_glyph("shield_check"),
+            font=self._icon_font_tuple(22),
+            text_color=COLOR_PRIMARY,
+            fg_color="transparent",
+        )
+        self.empty_icon_label.pack(expand=True)
+
+        self.empty_title_label = ctk.CTkLabel(
+            empty_inner,
+            text="Your vault is empty",
+            font=(FONT_FAMILY, 15, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        )
+        self.empty_title_label.pack(pady=(0, 6))
+
+        self.empty_desc_label = ctk.CTkLabel(
+            empty_inner,
+            text="Add your first credential to keep logins encrypted and accessible only on this device.",
+            font=(FONT_FAMILY, 11),
+            text_color=COLOR_TEXT_SECONDARY,
+            wraplength=310,
+            justify="center",
+        )
+        self.empty_desc_label.pack(pady=(0, 18))
+
+        self.empty_action_btn = ctk.CTkButton(
+            empty_inner,
+            text="+  Add Your First Credential",
+            height=40,
+            width=220,
+            corner_radius=8,
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_PRIMARY_HOVER,
+            text_color="#FFFFFF",
             font=(FONT_FAMILY, 11, "bold"),
-            bg=COLOR_SURFACE,
-            fg=COLOR_TEXT_PRIMARY,
-        ).pack(pady=(0, 3))
-        tk.Label(
-            self.empty_frame,
-            text="Add your first credential to get started.",
-            font=(FONT_FAMILY, 9),
-            bg=COLOR_SURFACE,
-            fg=COLOR_TEXT_SECONDARY,
-        ).pack()
-
-        self.tree.bind("<<TreeviewSelect>>", self.handle_row_select)
-
-        # Action Buttons Toolbar
-        actions_bar = tk.Frame(main_area, bg=COLOR_BG)
-        actions_bar.pack(fill="x", pady=(0, 0))
-
-        self.btn_show = ttk.Button(
-            actions_bar,
-            text="Show Password",
-            command=self.handle_show_password,
+            command=self.open_add_dialog,
         )
-        self.btn_show.pack(side="left", padx=(0, 6))
+        self.empty_action_btn.pack()
 
-        self.btn_copy = ttk.Button(
-            actions_bar,
-            text="Copy Password",
-            command=self.handle_copy_password,
-        )
-        self.btn_copy.pack(side="left", padx=(0, 6))
+    def _update_scrollbar_visibility(self):
+        """Shows the vertical scrollbar only when credential rows overflow the viewport."""
+        if not self._list_canvas or not hasattr(self, "_list_scrollbar"):
+            return
+        try:
+            if not self._list_canvas.winfo_exists():
+                return
+            yview = self._list_canvas.yview()
+            needs_scroll = yview != (0.0, 1.0)
+            is_packed = bool(self._list_scrollbar.winfo_manager())
+            if needs_scroll and not is_packed:
+                self._list_scrollbar.pack(side="right", fill="y", padx=(6, 0), before=self._list_canvas)
+            elif not needs_scroll and is_packed:
+                self._list_scrollbar.pack_forget()
+        except tk.TclError:
+            pass
 
-        self.btn_edit = ttk.Button(
-            actions_bar,
-            text="Edit",
-            command=self.open_edit_dialog,
-        )
-        self.btn_edit.pack(side="left", padx=(0, 6))
-
-        self.btn_delete = ttk.Button(
-            actions_bar,
-            text="Delete",
-            command=self.handle_delete_credential,
-        )
-        self.btn_delete.pack(side="left", padx=(0, 10))
-
-        # Secondary backup / restore buttons in action bar
-        self.btn_backup = ttk.Button(
-            actions_bar,
-            text="Backup",
-            command=self.handle_backup,
-        )
-        self.btn_backup.pack(side="right", padx=(6, 0))
-
-        self.btn_restore = ttk.Button(
-            actions_bar,
-            text="Restore",
-            command=self.handle_restore,
-        )
-        self.btn_restore.pack(side="right")
-
-        # Initial data load
-        self.refresh_credential_list()
-
-    def refresh_credential_list(self, entries=None):
+    def _create_credential_row(self, entry):
         """
-        Populates the credential table without decrypting passwords.
+        Creates a modern CustomTkinter credential card for a single sqlite3.Row.
+        Strictly renders non-sensitive metadata only; never reads or decrypts passwords.
         """
+        entry_id = entry["entry_id"]
+        site_name = entry["site_name"]
+        username_field = entry["username_field"]
+        updated_at = entry["updated_at"]
+
+        is_selected = self.selected_entry_id == entry_id
+        card_fg = COLOR_SURFACE_ELEVATED if is_selected else COLOR_SURFACE
+        card_border = COLOR_PRIMARY if is_selected else COLOR_BORDER
+
+        card = ctk.CTkFrame(
+            self.credential_rows_frame,
+            height=64,
+            corner_radius=10,
+            fg_color=card_fg,
+            border_width=1,
+            border_color=card_border,
+            cursor="hand2",
+        )
+        card.pack(fill="x", pady=(0, 8))
+        card.grid_propagate(False)
+        card.grid_columnconfigure(1, weight=1)
+        card.grid_rowconfigure(0, weight=1)
+
+        # Column 0: Application monogram or neutral fallback icon
+        clean_site = (site_name or "").strip()
+        first_char = clean_site[0].upper() if clean_site and clean_site[0].isalnum() else None
+
+        icon_tile = ctk.CTkFrame(
+            card,
+            width=38,
+            height=38,
+            corner_radius=8,
+            fg_color=COLOR_SURFACE_ELEVATED if not is_selected else COLOR_INPUT,
+            border_width=1,
+            border_color=COLOR_BORDER,
+        )
+        icon_tile.grid(row=0, column=0, padx=(14, 12), pady=12)
+        icon_tile.pack_propagate(False)
+
+        if first_char:
+            ctk.CTkLabel(
+                icon_tile,
+                text=first_char,
+                font=(FONT_FAMILY, 13, "bold"),
+                text_color=COLOR_PRIMARY,
+                fg_color="transparent",
+            ).pack(expand=True)
+        else:
+            ctk.CTkLabel(
+                icon_tile,
+                text=self._icon_glyph("globe"),
+                font=self._icon_font_tuple(15),
+                text_color=COLOR_TEXT_SECONDARY,
+                fg_color="transparent",
+            ).pack(expand=True)
+
+        # Column 1: Site / App name + Username / Email
+        meta_box = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
+        meta_box.grid(row=0, column=1, sticky="ew", pady=10)
+
+        site_lbl = ctk.CTkLabel(
+            meta_box,
+            text=_truncate_text(site_name, 46),
+            font=(FONT_FAMILY, 12, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+            anchor="w",
+        )
+        site_lbl.pack(anchor="w")
+
+        user_lbl = ctk.CTkLabel(
+            meta_box,
+            text=_truncate_text(username_field, 52),
+            font=(FONT_FAMILY, 10),
+            text_color=COLOR_TEXT_SECONDARY,
+            anchor="w",
+        )
+        user_lbl.pack(anchor="w")
+
+        # Column 2: Subtle Last Updated date
+        date_text = _format_updated_date(updated_at)
+        date_lbl = ctk.CTkLabel(
+            card,
+            text=date_text,
+            font=(FONT_FAMILY, 10),
+            text_color=COLOR_TEXT_MUTED,
+            anchor="e",
+        )
+        date_lbl.grid(row=0, column=2, padx=(12, 10))
+
+        # Column 3: Subtle chevron affordance (row click selects; Milestone 3 opens detail view)
+        chevron_lbl = ctk.CTkLabel(
+            card,
+            text=self._icon_glyph("chevron"),
+            font=self._icon_font_tuple(11),
+            text_color=COLOR_PRIMARY if is_selected else COLOR_TEXT_MUTED,
+            width=20,
+        )
+        chevron_lbl.grid(row=0, column=3, padx=(0, 14))
+        _ToolTip(chevron_lbl, "Select credential")
+
+        # Store metadata-only widget references (never store passwords)
+        self.row_widgets[entry_id] = {
+            "card": card,
+            "icon_tile": icon_tile,
+            "chevron": chevron_lbl,
+            "site_name": site_name,
+            "username_field": username_field,
+            "updated_at": updated_at,
+        }
+
+        def on_enter(_event=None):
+            if self.selected_entry_id != entry_id:
+                card.configure(fg_color=COLOR_SURFACE_ELEVATED)
+                chevron_lbl.configure(text_color=COLOR_TEXT_PRIMARY)
+
+        def on_leave(_event=None):
+            if self.selected_entry_id == entry_id:
+                return
+            try:
+                px, py = card.winfo_pointerxy()
+                cx, cy = card.winfo_rootx(), card.winfo_rooty()
+                if cx <= px <= cx + card.winfo_width() and cy <= py <= cy + card.winfo_height():
+                    return
+            except tk.TclError:
+                return
+            card.configure(fg_color=COLOR_SURFACE)
+            chevron_lbl.configure(text_color=COLOR_TEXT_MUTED)
+
+        def on_click(_event=None):
+            self.handle_row_click(entry_id)
+
+        # Bind click & hover cleanly across the entire row card
+        bind_targets = [card, icon_tile, meta_box, site_lbl, user_lbl, date_lbl, chevron_lbl]
+        for child in icon_tile.winfo_children():
+            bind_targets.append(child)
+        for target in bind_targets:
+            target.configure(cursor="hand2")
+            target.bind("<Enter>", on_enter, add="+")
+            target.bind("<Leave>", on_leave, add="+")
+            target.bind("<Button-1>", on_click, add="+")
+
+    def refresh_credential_list(self, entries=None, is_filtered=False):
+        """
+        Populates the modern CustomTkinter credential list without decrypting passwords.
+        """
+        if not hasattr(self, "credential_rows_frame"):
+            return
+
         self.selected_entry_id = None
-        self.update_action_button_states()
+        self.row_widgets = {}
 
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        for widget in self.credential_rows_frame.winfo_children():
+            widget.destroy()
 
         if entries is None:
+            self._last_search_query = ""
+            if hasattr(self, "search_entry") and self.search_entry.winfo_exists():
+                if self.search_entry.get():
+                    self.search_entry.delete(0, tk.END)
             entries = vault.get_credentials(self.current_user_id)
+            self._total_credential_count = len(entries)
+            is_filtered = False
 
-        for entry in entries:
-            entry_id = entry["entry_id"]
-            site_name = entry["site_name"]
-            username_field = entry["username_field"]
-            updated_at = entry["updated_at"]
-            self.tree.insert(
-                "",
-                "end",
-                iid=str(entry_id),
-                values=(site_name, username_field, updated_at),
-            )
+        self.displayed_entries = list(entries)
 
-        if hasattr(self, "empty_frame"):
-            if len(self.tree.get_children()) == 0:
-                self.empty_frame.place(relx=0.5, rely=0.5, anchor="center")
+        if len(self.displayed_entries) == 0:
+            self.list_viewport_frame.pack_forget()
+            if is_filtered:
+                self.empty_icon_label.configure(text=self._icon_glyph("search"))
+                self.empty_title_label.configure(text="No matching credentials")
+                query_preview = _truncate_text(self._last_search_query.strip(), 32)
+                self.empty_desc_label.configure(
+                    text=f'No saved credentials match "{query_preview}".'
+                )
+                self.empty_action_btn.configure(
+                    text="Clear Search",
+                    command=self.clear_search,
+                )
             else:
-                self.empty_frame.place_forget()
+                self.empty_icon_label.configure(text=self._icon_glyph("shield_check"))
+                self.empty_title_label.configure(text="Your vault is empty")
+                self.empty_desc_label.configure(
+                    text="Add your first credential to keep logins encrypted and accessible only on this device."
+                )
+                self.empty_action_btn.configure(
+                    text="+  Add Your First Credential",
+                    command=self.open_add_dialog,
+                )
+            self.empty_state_frame.pack(fill="both", expand=True)
+        else:
+            self.empty_state_frame.pack_forget()
+            self.list_viewport_frame.pack(fill="both", expand=True)
+            for entry in self.displayed_entries:
+                self._create_credential_row(entry)
+            if self._list_canvas is not None:
+                self._list_canvas.yview_moveto(0)
 
         if hasattr(self, "count_badge"):
-            count = len(self.tree.get_children())
-            self.count_badge.config(text=f"{count} Saved")
+            shown_count = len(self.displayed_entries)
+            if is_filtered:
+                self.count_badge.configure(
+                    text=f"{shown_count} of {self._total_credential_count} Saved"
+                )
+            else:
+                self.count_badge.configure(text=f"{shown_count} Saved")
 
-    def handle_search(self):
+    def handle_search(self, event=None):
+        """Filters displayed credentials via vault.search_credentials without decryption."""
         query = self.search_entry.get()
-        entries = vault.search_credentials(self.current_user_id, query)
-        self.refresh_credential_list(entries)
+        if event is not None and query == self._last_search_query:
+            return
+        self._last_search_query = query
+
+        stripped = query.strip()
+        if not stripped:
+            self.refresh_credential_list()
+            return
+
+        entries = vault.search_credentials(self.current_user_id, stripped)
+        self.refresh_credential_list(entries, is_filtered=True)
 
     def clear_search(self):
-        self.search_entry.delete(0, tk.END)
+        """Clears the search input and restores the full credential list."""
+        self._last_search_query = ""
+        if hasattr(self, "search_entry") and self.search_entry.winfo_exists():
+            self.search_entry.delete(0, tk.END)
         self.refresh_credential_list()
 
-    def handle_row_select(self, event=None):
-        selection = self.tree.selection()
-        if selection:
-            self.selected_entry_id = int(selection[0])
-        else:
-            self.selected_entry_id = None
-        self.update_action_button_states()
+    def handle_row_click(self, entry_id):
+        """Selects a credential row and invokes the Milestone 3 detail hook."""
+        prev_id = self.selected_entry_id
+        if prev_id is not None and prev_id in self.row_widgets and prev_id != entry_id:
+            prev_row = self.row_widgets[prev_id]
+            prev_row["card"].configure(fg_color=COLOR_SURFACE, border_color=COLOR_BORDER)
+            prev_row["icon_tile"].configure(fg_color=COLOR_SURFACE_ELEVATED)
+            prev_row["chevron"].configure(text_color=COLOR_TEXT_MUTED)
+
+        self.selected_entry_id = entry_id
+        if entry_id in self.row_widgets:
+            cur_row = self.row_widgets[entry_id]
+            cur_row["card"].configure(fg_color=COLOR_SURFACE_ELEVATED, border_color=COLOR_PRIMARY)
+            cur_row["icon_tile"].configure(fg_color=COLOR_INPUT)
+            cur_row["chevron"].configure(text_color=COLOR_PRIMARY)
+
+        self.on_credential_row_click(entry_id)
+
+    def on_credential_row_click(self, entry_id):
+        """
+        Extension hook wired to credential row clicks.
+        Milestone 3 will open the dedicated credential detail page from here.
+        """
+        return None
 
     def update_action_button_states(self):
-        has_selection = self.selected_entry_id is not None
-        if hasattr(self, "btn_add"):
-            self.btn_add.config(state="normal")
-        if hasattr(self, "btn_edit"):
-            self.btn_edit.config(state="normal" if has_selection else "disabled")
-        if hasattr(self, "btn_delete"):
-            self.btn_delete.config(state="normal" if has_selection else "disabled")
-        if hasattr(self, "btn_show"):
-            self.btn_show.config(state="normal" if has_selection else "disabled")
-        if hasattr(self, "btn_copy"):
-            self.btn_copy.config(state="normal" if has_selection else "disabled")
-        if hasattr(self, "btn_backup"):
-            self.btn_backup.config(state="normal")
-        if hasattr(self, "btn_restore"):
-            self.btn_restore.config(state="normal")
+        """Retained for compatibility; dashboard row selection manages visual state."""
+        return None
 
     # ----------------------------------------------------------------------
     # 4. Add Credential Dialog
@@ -1442,13 +2108,23 @@ class PasswordManagerApp:
     # ----------------------------------------------------------------------
     def open_generator_dialog(self):
         """Opens a dedicated generator modal styled with the Onesium palette."""
+        if self.active_dialog and self.active_dialog.winfo_exists():
+            self.active_dialog.destroy()
+
         dialog = tk.Toplevel(self.root)
         dialog.title("Onesium — Password Generator")
         dialog.resizable(False, False)
         dialog.configure(bg=COLOR_BG)
         dialog.transient(self.root)
         dialog.grab_set()
+        self.active_dialog = dialog
         center_window(dialog, 400, 320, self.root)
+
+        def close_generator():
+            dialog.destroy()
+            self.active_dialog = None
+
+        dialog.protocol("WM_DELETE_WINDOW", close_generator)
 
         frame = tk.Frame(
             dialog,
@@ -1523,7 +2199,7 @@ class PasswordManagerApp:
         copy_btn = ttk.Button(btn_row, text="Copy to Clipboard", style="Primary.TButton", command=copy_generated)
         copy_btn.pack(side="left", padx=(0, 6))
 
-        close_btn = ttk.Button(btn_row, text="Close", command=dialog.destroy)
+        close_btn = ttk.Button(btn_row, text="Close", command=close_generator)
         close_btn.pack(side="right")
 
     # ----------------------------------------------------------------------
@@ -1665,8 +2341,8 @@ class PasswordManagerApp:
             self.root.after_cancel(self.auto_lock_job)
             self.auto_lock_job = None
 
-    def handle_auto_lock(self):
-        """Locks the session upon inactivity timeout."""
+    def _clear_session_state(self):
+        """Clears active dialogs, in-memory credentials, displayed metadata, and clipboard."""
         self.cancel_auto_lock_timer()
 
         if self.active_dialog and self.active_dialog.winfo_exists():
@@ -1677,11 +2353,19 @@ class PasswordManagerApp:
         self.current_encryption_key = None
         self.current_username = None
         self.selected_entry_id = None
+        self.displayed_entries = []
+        self.row_widgets = {}
+        self._total_credential_count = 0
+        self._last_search_query = ""
 
         try:
             self.root.clipboard_clear()
         except Exception:
             pass
+
+    def handle_auto_lock(self):
+        """Locks the session upon inactivity timeout."""
+        self._clear_session_state()
 
         self.show_login_screen(
             initial_message="Session locked due to inactivity. Please login again.",
@@ -1692,23 +2376,7 @@ class PasswordManagerApp:
     # 11. Logout Handling
     # ----------------------------------------------------------------------
     def handle_logout(self):
-        self.cancel_auto_lock_timer()
-
-        # Close any active modal dialogs
-        if self.active_dialog and self.active_dialog.winfo_exists():
-            self.active_dialog.destroy()
-        self.active_dialog = None
-
-        # Clear in-memory session credentials & selection
-        self.current_user_id = None
-        self.current_encryption_key = None
-        self.current_username = None
-        self.selected_entry_id = None
-
-        try:
-            self.root.clipboard_clear()
-        except Exception:
-            pass
+        self._clear_session_state()
 
         self.show_login_screen(
             initial_message="You have been logged out.",
