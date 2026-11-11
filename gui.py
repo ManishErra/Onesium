@@ -1,38 +1,60 @@
+import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import auth
 import vault
 import password_utils
 
+# Configure CustomTkinter appearance (must precede any CTk widget creation)
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+
 AUTO_LOCK_MS = 5 * 60 * 1000  # 5 minutes in milliseconds
 
 # ---------------------------------------------------------------------------
-# Onesium Design System - Precision Vault Palette
+# Onesium Design System — Precision Vault Palette
 # ---------------------------------------------------------------------------
-COLOR_BG = "#0F1117"              # Deep canvas background
-COLOR_SURFACE = "#171B23"         # Cards, modal dialogs, panels, sidebar
-COLOR_SURFACE_ELEVATED = "#202632"# Elevated surface, table headers, active items
-COLOR_INPUT = "#0B0E14"           # Input field background
-COLOR_BORDER = "#2A3140"          # 1px structural boundaries & outlines
-COLOR_PRIMARY = "#2563EB"         # Primary blue interactive buttons
-COLOR_PRIMARY_HOVER = "#1D4ED8"   # Primary button hover
-COLOR_PRIMARY_ACTIVE = "#1E40AF"  # Primary button active
-COLOR_ACCENT = "#3B82F6"          # Bright focus accent ring
-COLOR_TEXT_PRIMARY = "#F3F4F6"    # High contrast primary text
-COLOR_TEXT_SECONDARY = "#9CA3AF"  # Secondary field labels & captions
-COLOR_TEXT_MUTED = "#6B7280"      # Placeholders, status, timestamps
-COLOR_TEXT_DIM = "#6B7280"        # Dim text alias
-COLOR_SUCCESS = "#10B981"         # Green for cryptographic strength & offline status
-COLOR_WARNING = "#F59E0B"         # Yellow for moderate strength
-COLOR_DANGER = "#EF4444"          # Red for errors & common password warnings
+COLOR_BG = "#0B0F17"               # Deep canvas background
+COLOR_SURFACE = "#121926"          # Cards, modal dialogs, panels, sidebar
+COLOR_SURFACE_ELEVATED = "#192333" # Elevated surface, table headers, active items
+COLOR_INPUT = "#0F1724"            # Input field background
+COLOR_BORDER = "#273449"           # 1px structural boundaries & outlines
+COLOR_PRIMARY = "#3B82F6"          # Primary blue interactive buttons
+COLOR_PRIMARY_HOVER = "#2563EB"    # Primary button hover
+COLOR_PRIMARY_ACTIVE = "#1E40AF"   # Primary button active
+COLOR_ACCENT = "#3B82F6"           # Bright focus accent ring
+COLOR_TEXT_PRIMARY = "#F8FAFC"     # High contrast primary text
+COLOR_TEXT_SECONDARY = "#94A3B8"   # Secondary field labels & captions
+COLOR_TEXT_MUTED = "#64748B"       # Placeholders, status, timestamps
+COLOR_TEXT_DIM = "#64748B"         # Dim text alias
+COLOR_SUCCESS = "#10B981"          # Green for cryptographic strength & offline status
+COLOR_WARNING = "#F59E0B"          # Yellow for moderate strength
+COLOR_DANGER = "#EF4444"           # Red for errors & common password warnings
 
 FONT_FAMILY = "Segoe UI"
 FONT_MONO = "Consolas"
 
+# Strength → colour map (used in registration feedback)
+_STRENGTH_COLORS = {
+    "Very Weak":  COLOR_DANGER,
+    "Weak":       COLOR_WARNING,
+    "Moderate":   COLOR_WARNING,
+    "Strong":     COLOR_SUCCESS,
+    "Very Strong": COLOR_SUCCESS,
+}
+
 
 def apply_vault_theme(root):
     """Configures modern dark ttk styles for the Onesium desktop interface."""
-    root.configure(bg=COLOR_BG)
+    # CTk root uses fg_color; plain Tk root uses bg
+    try:
+        root.configure(fg_color=COLOR_BG)
+    except Exception:
+        try:
+            root.configure(bg=COLOR_BG)
+        except Exception:
+            pass
+
     style = ttk.Style()
     try:
         style.theme_use("clam")
@@ -193,7 +215,8 @@ class PasswordManagerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Onesium — The Credential Vault")
-        self.root.geometry("480x480")
+        self.root.geometry("460x560")
+        self.root.minsize(420, 480)
         self.root.resizable(False, False)
 
         apply_vault_theme(self.root)
@@ -210,9 +233,12 @@ class PasswordManagerApp:
         self.root.bind_all("<Key>", self.reset_auto_lock_timer)
         self.root.bind_all("<Button>", self.reset_auto_lock_timer)
 
-        # Container frame for switching views
-        self.container = ttk.Frame(self.root, padding=0)
+        # Container frame for switching views (CTkFrame replaces ttk.Frame)
+        self.container = ctk.CTkFrame(self.root, corner_radius=0, fg_color=COLOR_BG)
         self.container.pack(fill="both", expand=True)
+
+        # Centre window on screen before showing first view
+        center_window(self.root, 460, 560)
 
         self.show_login_screen()
 
@@ -222,7 +248,7 @@ class PasswordManagerApp:
             widget.destroy()
 
     def _toggle_show(self, entry, btn):
-        """Toggles password masking between '*' and plain text."""
+        """Toggles password masking for plain tk/ttk Entry widgets (dashboard dialogs)."""
         if entry.cget("show") == "*":
             entry.config(show="")
             btn.config(text="Hide")
@@ -231,156 +257,208 @@ class PasswordManagerApp:
             btn.config(text="Show")
 
     # ----------------------------------------------------------------------
-    # 1. Login Screen
+    # 1. Login Screen  (CustomTkinter)
     # ----------------------------------------------------------------------
     def show_login_screen(self, initial_message="", is_success=False):
-        self.root.geometry("460x490")
+        self.root.geometry("460x560")
+        self.root.minsize(420, 500)
         self.root.resizable(False, False)
         self.clear_container()
 
-        main_frame = tk.Frame(self.container, bg=COLOR_BG, padx=28, pady=24)
-        main_frame.pack(fill="both", expand=True)
+        # Outer padding wrapper
+        outer = ctk.CTkFrame(self.container, fg_color=COLOR_BG, corner_radius=0)
+        outer.pack(fill="both", expand=True, padx=28, pady=20)
 
-        # Header Branding
-        brand_frame = tk.Frame(main_frame, bg=COLOR_BG)
-        brand_frame.pack(fill="x", pady=(4, 14))
+        # ---- Branding Header ----
+        brand_frame = ctk.CTkFrame(outer, fg_color=COLOR_BG, corner_radius=0)
+        brand_frame.pack(fill="x", pady=(0, 14))
 
-        logo_lbl = tk.Label(
+        ctk.CTkLabel(
             brand_frame,
-            text="🛡  ONESIUM",
-            font=(FONT_FAMILY, 17, "bold"),
-            bg=COLOR_BG,
-            fg=COLOR_TEXT_PRIMARY,
-        )
-        logo_lbl.pack(pady=(0, 2))
+            text="\U0001f6e1  ONESIUM",
+            font=(FONT_FAMILY, 22, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).pack(pady=(0, 3))
 
-        sub_lbl = tk.Label(
+        ctk.CTkLabel(
             brand_frame,
             text="The Credential Vault",
-            font=(FONT_FAMILY, 10),
-            bg=COLOR_BG,
-            fg=COLOR_TEXT_MUTED,
-        )
-        sub_lbl.pack(pady=(0, 4))
+            font=(FONT_FAMILY, 11),
+            text_color=COLOR_TEXT_MUTED,
+        ).pack(pady=(0, 8))
 
-        status_tag = tk.Label(
+        ctk.CTkLabel(
             brand_frame,
-            text="● Offline • Private • Local",
-            font=(FONT_FAMILY, 8, "bold"),
-            bg=COLOR_SURFACE,
-            fg=COLOR_SUCCESS,
-            padx=10,
-            pady=3,
-            bd=1,
-            relief="solid",
-            highlightbackground=COLOR_BORDER,
-            highlightthickness=1,
+            text="  \u25cf  Offline  \u2022  Private  \u2022  Local  ",
+            font=(FONT_FAMILY, 9, "bold"),
+            text_color=COLOR_SUCCESS,
+            fg_color=COLOR_SURFACE,
+            corner_radius=4,
+        ).pack(pady=(0, 0))
+
+        # ---- Form Card ----
+        card = ctk.CTkFrame(
+            outer,
+            fg_color=COLOR_SURFACE,
+            corner_radius=12,
+            border_width=1,
+            border_color=COLOR_BORDER,
         )
-        status_tag.pack(pady=(4, 0))
+        card.pack(fill="x", pady=(14, 10))
 
-        # Form Card Frame
-        card = tk.Frame(
-            main_frame,
-            bg=COLOR_SURFACE,
-            bd=1,
-            relief="solid",
-            highlightbackground=COLOR_BORDER,
-            highlightthickness=1,
-            padx=20,
-            pady=16,
+        # Card inner content (padded nested frame)
+        ci = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
+        ci.pack(fill="both", expand=True, padx=20, pady=16)
+
+        ctk.CTkLabel(
+            ci, text="Welcome back",
+            font=(FONT_FAMILY, 13, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 2))
+
+        ctk.CTkLabel(
+            ci, text="Your vault is stored locally on this device.",
+            font=(FONT_FAMILY, 10),
+            text_color=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(0, 14))
+
+        # Username field
+        ctk.CTkLabel(
+            ci, text="Username",
+            font=(FONT_FAMILY, 10, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 4))
+
+        self.login_username_entry = ctk.CTkEntry(
+            ci,
+            height=38,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY,
+            placeholder_text="Enter your username",
+            placeholder_text_color=COLOR_TEXT_MUTED,
         )
-        card.pack(fill="x", pady=(6, 10))
-
-        tk.Label(card, text="Welcome back", font=(FONT_FAMILY, 11, "bold"), bg=COLOR_SURFACE, fg=COLOR_TEXT_PRIMARY).pack(anchor="w", pady=(0, 1))
-        tk.Label(card, text="Sign in to your vault", font=(FONT_FAMILY, 8), bg=COLOR_SURFACE, fg=COLOR_TEXT_SECONDARY).pack(anchor="w", pady=(0, 10))
-
-        # Username Field
-        tk.Label(card, text="Username", font=(FONT_FAMILY, 9, "bold"), bg=COLOR_SURFACE, fg=COLOR_TEXT_PRIMARY).pack(anchor="w", pady=(0, 3))
-        self.login_username_entry = ttk.Entry(card, width=32)
-        self.login_username_entry.pack(fill="x", pady=(0, 10))
+        self.login_username_entry.pack(fill="x", pady=(0, 12))
         self.login_username_entry.focus()
 
-        # Master Password Field with Show/Hide toggle
-        pwd_top_row = tk.Frame(card, bg=COLOR_SURFACE)
-        pwd_top_row.pack(fill="x", pady=(0, 3))
-        tk.Label(pwd_top_row, text="Master Password", font=(FONT_FAMILY, 9, "bold"), bg=COLOR_SURFACE, fg=COLOR_TEXT_PRIMARY).pack(side="left")
+        # Master Password — label row with Show/Hide toggle
+        pwd_label_row = ctk.CTkFrame(ci, fg_color="transparent", corner_radius=0)
+        pwd_label_row.pack(fill="x", pady=(0, 4))
 
-        login_eye_btn = tk.Button(
-            pwd_top_row,
+        ctk.CTkLabel(
+            pwd_label_row, text="Master Password",
+            font=(FONT_FAMILY, 10, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).pack(side="left")
+
+        # Closure-based show/hide state (avoids cget("show") inconsistencies)
+        _pw_shown = [False]
+
+        def _toggle_login_pw():
+            if _pw_shown[0]:
+                self.login_password_entry.configure(show="*")
+                _login_eye.configure(text="Show")
+                _pw_shown[0] = False
+            else:
+                self.login_password_entry.configure(show="")
+                _login_eye.configure(text="Hide")
+                _pw_shown[0] = True
+
+        _login_eye = ctk.CTkButton(
+            pwd_label_row,
             text="Show",
-            font=(FONT_FAMILY, 8),
-            bg=COLOR_SURFACE_ELEVATED,
-            fg=COLOR_TEXT_MUTED,
-            activebackground="#2A344A",
-            activeforeground=COLOR_TEXT_PRIMARY,
-            bd=1,
-            relief="solid",
-            padx=5,
-            pady=0,
-            cursor="hand2",
-            command=lambda: self._toggle_show(self.login_password_entry, login_eye_btn),
+            width=52, height=24,
+            corner_radius=4,
+            fg_color=COLOR_SURFACE_ELEVATED,
+            hover_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_MUTED,
+            font=(FONT_FAMILY, 9),
+            command=_toggle_login_pw,
         )
-        login_eye_btn.pack(side="right")
+        _login_eye.pack(side="right")
 
-        self.login_password_entry = ttk.Entry(card, show="*", width=32)
-        self.login_password_entry.pack(fill="x", pady=(0, 10))
+        self.login_password_entry = ctk.CTkEntry(
+            ci,
+            height=38,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY,
+            placeholder_text="Enter your master password",
+            placeholder_text_color=COLOR_TEXT_MUTED,
+        )
+        self.login_password_entry.pack(fill="x", pady=(0, 12))
+        # Explicitly configure show="*" after pack to work around a CTk 6.x
+        # issue where the show parameter is not reliably applied on widget rebuild.
+        self.login_password_entry.configure(show="*")
+        # CTkEntry proxies bind() to its internal tk.Entry — <Return> fires correctly
         self.login_password_entry.bind("<Return>", lambda e: self.handle_login())
 
-        # Status Message Label
+        # Status / error message label
         status_color = COLOR_SUCCESS if is_success else COLOR_DANGER
-        self.login_status_label = tk.Label(
-            card,
+        self.login_status_label = ctk.CTkLabel(
+            ci,
             text=initial_message,
-            fg=status_color,
-            bg=COLOR_SURFACE,
-            wraplength=360,
+            text_color=status_color if initial_message else COLOR_DANGER,
             font=(FONT_FAMILY, 9),
+            wraplength=360,
         )
-        self.login_status_label.pack(pady=(0, 6))
+        self.login_status_label.pack(pady=(0, 8))
 
-        # Unlock Vault Button (Login)
-        login_btn = ttk.Button(
-            card,
+        # Unlock Vault — primary action button
+        ctk.CTkButton(
+            ci,
             text="Unlock Vault",
-            style="Primary.TButton",
+            height=42,
+            corner_radius=8,
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_PRIMARY_HOVER,
+            text_color="#FFFFFF",
+            font=(FONT_FAMILY, 11, "bold"),
             command=self.handle_login,
-        )
-        login_btn.pack(fill="x", pady=(2, 4))
+        ).pack(fill="x", pady=(0, 4))
 
-        # Switch to Register Link
-        switch_frame = tk.Frame(main_frame, bg=COLOR_BG)
-        switch_frame.pack(pady=(6, 0))
-        tk.Label(switch_frame, text="Don't have a vault?", bg=COLOR_BG, fg=COLOR_TEXT_MUTED, font=(FONT_FAMILY, 9)).pack(side="left", padx=(0, 6))
-        register_link = tk.Button(
+        # ---- Create Account link ----
+        switch_frame = ctk.CTkFrame(outer, fg_color=COLOR_BG, corner_radius=0)
+        switch_frame.pack(pady=(8, 0))
+
+        ctk.CTkLabel(
+            switch_frame,
+            text="Don't have a vault?",
+            text_color=COLOR_TEXT_MUTED,
+            font=(FONT_FAMILY, 10),
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkButton(
             switch_frame,
             text="Create Account",
-            bg=COLOR_BG,
-            fg=COLOR_PRIMARY,
-            activebackground=COLOR_BG,
-            activeforeground=COLOR_ACCENT,
-            bd=0,
-            cursor="hand2",
-            font=(FONT_FAMILY, 9, "bold underline"),
+            fg_color="transparent",
+            hover_color=COLOR_BG,
+            text_color=COLOR_PRIMARY,
+            font=(FONT_FAMILY, 10, "bold"),
             command=self.show_register_screen,
-        )
-        register_link.pack(side="left")
+            width=120,
+            height=28,
+            border_width=0,
+        ).pack(side="left")
 
     def handle_login(self):
         username = self.login_username_entry.get().strip()
         password = self.login_password_entry.get()
 
         if not username or not password:
-            self.login_status_label.config(
+            self.login_status_label.configure(
                 text="Please enter both username and master password.",
-                fg=COLOR_DANGER,
+                text_color=COLOR_DANGER,
             )
             return
 
         result = auth.login_user(username, password)
         if result is None:
-            self.login_status_label.config(
+            self.login_status_label.configure(
                 text="Invalid username or master password.",
-                fg=COLOR_DANGER,
+                text_color=COLOR_DANGER,
             )
             self.login_password_entry.delete(0, tk.END)
             return
@@ -394,149 +472,248 @@ class PasswordManagerApp:
         self.show_dashboard_screen()
 
     # ----------------------------------------------------------------------
-    # 2. Registration Screen
+    # 2. Registration Screen  (CustomTkinter)
     # ----------------------------------------------------------------------
     def show_register_screen(self):
-        self.root.geometry("460x550")
+        self.root.geometry("460x630")
+        self.root.minsize(420, 580)
         self.root.resizable(False, False)
         self.clear_container()
 
-        main_frame = tk.Frame(self.container, bg=COLOR_BG, padx=28, pady=20)
-        main_frame.pack(fill="both", expand=True)
+        # Outer padding wrapper
+        outer = ctk.CTkFrame(self.container, fg_color=COLOR_BG, corner_radius=0)
+        outer.pack(fill="both", expand=True, padx=28, pady=16)
 
-        # Header Branding
-        brand_frame = tk.Frame(main_frame, bg=COLOR_BG)
-        brand_frame.pack(fill="x", pady=(2, 10))
+        # ---- Branding Header ----
+        brand_frame = ctk.CTkFrame(outer, fg_color=COLOR_BG, corner_radius=0)
+        brand_frame.pack(fill="x", pady=(0, 10))
 
-        tk.Label(brand_frame, text="🛡  ONESIUM", font=(FONT_FAMILY, 15, "bold"), bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY).pack(pady=(0, 2))
-        tk.Label(brand_frame, text="Create New Local Vault", font=(FONT_FAMILY, 9), bg=COLOR_BG, fg=COLOR_TEXT_MUTED).pack(pady=(0, 2))
+        ctk.CTkLabel(
+            brand_frame,
+            text="\U0001f6e1  ONESIUM",
+            font=(FONT_FAMILY, 20, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).pack(pady=(0, 2))
 
-        # Form Card Frame
-        card = tk.Frame(
-            main_frame,
-            bg=COLOR_SURFACE,
-            bd=1,
-            relief="solid",
-            highlightbackground=COLOR_BORDER,
-            highlightthickness=1,
-            padx=20,
-            pady=14,
+        ctk.CTkLabel(
+            brand_frame,
+            text="Create Your Vault",
+            font=(FONT_FAMILY, 11),
+            text_color=COLOR_TEXT_MUTED,
+        ).pack(pady=(0, 0))
+
+        # ---- Form Card ----
+        card = ctk.CTkFrame(
+            outer,
+            fg_color=COLOR_SURFACE,
+            corner_radius=12,
+            border_width=1,
+            border_color=COLOR_BORDER,
         )
-        card.pack(fill="x", pady=(4, 6))
+        card.pack(fill="x", pady=(10, 6))
 
-        # Username Field
-        tk.Label(card, text="Username", font=(FONT_FAMILY, 9, "bold"), bg=COLOR_SURFACE, fg=COLOR_TEXT_PRIMARY).pack(anchor="w", pady=(0, 2))
-        self.reg_username_entry = ttk.Entry(card, width=32)
-        self.reg_username_entry.pack(fill="x", pady=(0, 8))
+        # Card inner content
+        ci = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
+        ci.pack(fill="both", expand=True, padx=20, pady=14)
+
+        # Username field
+        ctk.CTkLabel(
+            ci, text="Username",
+            font=(FONT_FAMILY, 10, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 4))
+
+        self.reg_username_entry = ctk.CTkEntry(
+            ci,
+            height=38,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY,
+            placeholder_text="Choose a username",
+            placeholder_text_color=COLOR_TEXT_MUTED,
+        )
+        self.reg_username_entry.pack(fill="x", pady=(0, 10))
         self.reg_username_entry.focus()
 
-        # Master Password Field with Show/Hide toggle
-        pwd_top_row = tk.Frame(card, bg=COLOR_SURFACE)
-        pwd_top_row.pack(fill="x", pady=(0, 2))
-        tk.Label(pwd_top_row, text="Master Password", font=(FONT_FAMILY, 9, "bold"), bg=COLOR_SURFACE, fg=COLOR_TEXT_PRIMARY).pack(side="left")
+        # Master Password — label row with Show/Hide toggle
+        pwd_row = ctk.CTkFrame(ci, fg_color="transparent", corner_radius=0)
+        pwd_row.pack(fill="x", pady=(0, 4))
 
-        reg_eye1 = tk.Button(
-            pwd_top_row,
+        ctk.CTkLabel(
+            pwd_row, text="Master Password",
+            font=(FONT_FAMILY, 10, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).pack(side="left")
+
+        _pw1_shown = [False]
+
+        def _toggle_reg_pw1():
+            if _pw1_shown[0]:
+                self.reg_password_entry.configure(show="*")
+                _reg_eye1.configure(text="Show")
+                _pw1_shown[0] = False
+            else:
+                self.reg_password_entry.configure(show="")
+                _reg_eye1.configure(text="Hide")
+                _pw1_shown[0] = True
+
+        _reg_eye1 = ctk.CTkButton(
+            pwd_row,
             text="Show",
-            font=(FONT_FAMILY, 8),
-            bg=COLOR_SURFACE_ELEVATED,
-            fg=COLOR_TEXT_MUTED,
-            activebackground="#2A344A",
-            activeforeground=COLOR_TEXT_PRIMARY,
-            bd=1,
-            relief="solid",
-            padx=5,
-            pady=0,
-            cursor="hand2",
-            command=lambda: self._toggle_show(self.reg_password_entry, reg_eye1),
+            width=52, height=24,
+            corner_radius=4,
+            fg_color=COLOR_SURFACE_ELEVATED,
+            hover_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_MUTED,
+            font=(FONT_FAMILY, 9),
+            command=_toggle_reg_pw1,
         )
-        reg_eye1.pack(side="right")
+        _reg_eye1.pack(side="right")
 
         self.reg_pwd_var = tk.StringVar()
-        self.reg_password_entry = ttk.Entry(card, textvariable=self.reg_pwd_var, show="*", width=32)
-        self.reg_password_entry.pack(fill="x", pady=(0, 2))
+        self.reg_password_entry = ctk.CTkEntry(
+            ci,
+            textvariable=self.reg_pwd_var,
+            height=38,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY,
+            placeholder_text="Create a strong master password",
+            placeholder_text_color=COLOR_TEXT_MUTED,
+        )
+        self.reg_password_entry.pack(fill="x", pady=(0, 4))
+        self.reg_password_entry.configure(show="*")
 
-        # Strength & Common Warning
-        self.reg_strength_label = ttk.Label(card, text="Strength: Very Weak", font=(FONT_FAMILY, 8, "bold"), style="Card.TLabel")
-        self.reg_strength_label.pack(anchor="w", pady=(2, 0))
+        # Password strength indicator
+        self.reg_strength_label = ctk.CTkLabel(
+            ci,
+            text="Strength: Very Weak",
+            font=(FONT_FAMILY, 9, "bold"),
+            text_color=COLOR_DANGER,
+        )
+        self.reg_strength_label.pack(anchor="w", pady=(0, 2))
 
-        self.reg_common_warn = tk.Label(card, text="", fg=COLOR_DANGER, bg=COLOR_SURFACE, font=(FONT_FAMILY, 8))
-        self.reg_common_warn.pack(anchor="w", pady=(0, 6))
+        # Common password warning
+        self.reg_common_warn = ctk.CTkLabel(
+            ci,
+            text="",
+            font=(FONT_FAMILY, 9),
+            text_color=COLOR_DANGER,
+        )
+        self.reg_common_warn.pack(anchor="w", pady=(0, 8))
 
         def update_reg_feedback(*args):
             val = self.reg_pwd_var.get()
             st = password_utils.check_password_strength(val)
-            self.reg_strength_label.config(text=f"Strength: {st['label']}")
+            color = _STRENGTH_COLORS.get(st["label"], COLOR_TEXT_SECONDARY)
+            self.reg_strength_label.configure(
+                text=f"Strength: {st['label']}",
+                text_color=color,
+            )
             if password_utils.is_common_password(val):
-                self.reg_common_warn.config(text="Warning: This is a commonly used password.")
+                self.reg_common_warn.configure(text="\u26a0  This is a commonly used password.")
             else:
-                self.reg_common_warn.config(text="")
+                self.reg_common_warn.configure(text="")
 
         self.reg_pwd_var.trace_add("write", update_reg_feedback)
 
-        # Confirm Master Password Field with Show/Hide toggle
-        cpwd_top_row = tk.Frame(card, bg=COLOR_SURFACE)
-        cpwd_top_row.pack(fill="x", pady=(0, 2))
-        tk.Label(cpwd_top_row, text="Confirm Master Password", font=(FONT_FAMILY, 9, "bold"), bg=COLOR_SURFACE, fg=COLOR_TEXT_PRIMARY).pack(side="left")
+        # Confirm Master Password — label row with Show/Hide toggle
+        cpwd_row = ctk.CTkFrame(ci, fg_color="transparent", corner_radius=0)
+        cpwd_row.pack(fill="x", pady=(0, 4))
 
-        reg_eye2 = tk.Button(
-            cpwd_top_row,
+        ctk.CTkLabel(
+            cpwd_row, text="Confirm Master Password",
+            font=(FONT_FAMILY, 10, "bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).pack(side="left")
+
+        _pw2_shown = [False]
+
+        def _toggle_reg_pw2():
+            if _pw2_shown[0]:
+                self.reg_confirm_entry.configure(show="*")
+                _reg_eye2.configure(text="Show")
+                _pw2_shown[0] = False
+            else:
+                self.reg_confirm_entry.configure(show="")
+                _reg_eye2.configure(text="Hide")
+                _pw2_shown[0] = True
+
+        _reg_eye2 = ctk.CTkButton(
+            cpwd_row,
             text="Show",
-            font=(FONT_FAMILY, 8),
-            bg=COLOR_SURFACE_ELEVATED,
-            fg=COLOR_TEXT_MUTED,
-            activebackground="#2A344A",
-            activeforeground=COLOR_TEXT_PRIMARY,
-            bd=1,
-            relief="solid",
-            padx=5,
-            pady=0,
-            cursor="hand2",
-            command=lambda: self._toggle_show(self.reg_confirm_entry, reg_eye2),
+            width=52, height=24,
+            corner_radius=4,
+            fg_color=COLOR_SURFACE_ELEVATED,
+            hover_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_MUTED,
+            font=(FONT_FAMILY, 9),
+            command=_toggle_reg_pw2,
         )
-        reg_eye2.pack(side="right")
+        _reg_eye2.pack(side="right")
 
-        self.reg_confirm_entry = ttk.Entry(card, show="*", width=32)
-        self.reg_confirm_entry.pack(fill="x", pady=(0, 8))
+        self.reg_confirm_entry = ctk.CTkEntry(
+            ci,
+            height=38,
+            corner_radius=8,
+            fg_color=COLOR_INPUT,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_PRIMARY,
+            placeholder_text="Confirm your master password",
+            placeholder_text_color=COLOR_TEXT_MUTED,
+        )
+        self.reg_confirm_entry.pack(fill="x", pady=(0, 10))
+        self.reg_confirm_entry.configure(show="*")
         self.reg_confirm_entry.bind("<Return>", lambda e: self.handle_register())
 
-        # Status Message Label
-        self.reg_status_label = tk.Label(
-            card,
+        # Status / error message label
+        self.reg_status_label = ctk.CTkLabel(
+            ci,
             text="",
-            fg=COLOR_DANGER,
-            bg=COLOR_SURFACE,
-            wraplength=360,
+            text_color=COLOR_DANGER,
             font=(FONT_FAMILY, 9),
+            wraplength=360,
         )
         self.reg_status_label.pack(pady=(0, 6))
 
-        # Create Vault Button (Register)
-        register_btn = ttk.Button(
-            card,
+        # Create Vault — primary action button
+        ctk.CTkButton(
+            ci,
             text="Create Vault",
-            style="Primary.TButton",
+            height=42,
+            corner_radius=8,
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_PRIMARY_HOVER,
+            text_color="#FFFFFF",
+            font=(FONT_FAMILY, 11, "bold"),
             command=self.handle_register,
-        )
-        register_btn.pack(fill="x", pady=(2, 4))
+        ).pack(fill="x", pady=(0, 4))
 
-        # Back to Login Link
-        switch_frame = tk.Frame(main_frame, bg=COLOR_BG)
-        switch_frame.pack(pady=(4, 0))
-        tk.Label(switch_frame, text="Already have a vault?", bg=COLOR_BG, fg=COLOR_TEXT_MUTED, font=(FONT_FAMILY, 9)).pack(side="left", padx=(0, 6))
-        login_link = tk.Button(
+        # ---- Back to Login link ----
+        switch_frame = ctk.CTkFrame(outer, fg_color=COLOR_BG, corner_radius=0)
+        switch_frame.pack(pady=(6, 0))
+
+        ctk.CTkLabel(
+            switch_frame,
+            text="Already have a vault?",
+            text_color=COLOR_TEXT_MUTED,
+            font=(FONT_FAMILY, 10),
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkButton(
             switch_frame,
             text="Back to Login",
-            bg=COLOR_BG,
-            fg=COLOR_PRIMARY,
-            activebackground=COLOR_BG,
-            activeforeground=COLOR_ACCENT,
-            bd=0,
-            cursor="hand2",
-            font=(FONT_FAMILY, 9, "bold underline"),
+            fg_color="transparent",
+            hover_color=COLOR_BG,
+            text_color=COLOR_PRIMARY,
+            font=(FONT_FAMILY, 10, "bold"),
             command=self.show_login_screen,
-        )
-        login_link.pack(side="left")
+            width=110,
+            height=28,
+            border_width=0,
+        ).pack(side="left")
 
     def handle_register(self):
         username = self.reg_username_entry.get().strip()
@@ -544,31 +721,31 @@ class PasswordManagerApp:
         confirm_password = self.reg_confirm_entry.get()
 
         if not username:
-            self.reg_status_label.config(text="Username cannot be empty.", fg=COLOR_DANGER)
+            self.reg_status_label.configure(text="Username cannot be empty.", text_color=COLOR_DANGER)
             return
 
         if not password:
-            self.reg_status_label.config(text="Master password cannot be empty.", fg=COLOR_DANGER)
+            self.reg_status_label.configure(text="Master password cannot be empty.", text_color=COLOR_DANGER)
             return
 
         if password != confirm_password:
-            self.reg_status_label.config(text="Passwords do not match.", fg=COLOR_DANGER)
+            self.reg_status_label.configure(text="Passwords do not match.", text_color=COLOR_DANGER)
             return
 
         try:
             user_id = auth.register_user(username, password)
         except (ValueError, TypeError) as e:
-            self.reg_status_label.config(text=str(e), fg=COLOR_DANGER)
+            self.reg_status_label.configure(text=str(e), text_color=COLOR_DANGER)
             return
 
         if user_id is None:
-            self.reg_status_label.config(
+            self.reg_status_label.configure(
                 text="Username already exists. Please choose another.",
-                fg=COLOR_DANGER,
+                text_color=COLOR_DANGER,
             )
             return
 
-        # Registration successful -> return to login with green success banner
+        # Registration successful → return to login with green success banner
         self.show_login_screen(
             initial_message=f"Account '{username}' created successfully! Please login.",
             is_success=True,
@@ -601,7 +778,7 @@ class PasswordManagerApp:
 
         logo_title = tk.Label(
             brand_box,
-            text="🛡  ONESIUM",
+            text="\U0001f6e1  ONESIUM",
             font=(FONT_FAMILY, 11, "bold"),
             bg=COLOR_SURFACE,
             fg=COLOR_TEXT_PRIMARY,
@@ -1542,6 +1719,8 @@ class PasswordManagerApp:
 def start_app(root=None):
     """Entry helper to launch GUI application."""
     if root is None:
-        root = tk.Tk()
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+        root = ctk.CTk()
     app = PasswordManagerApp(root)
     return app
